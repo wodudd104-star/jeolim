@@ -17,6 +17,7 @@ RUN npm ci --omit=dev
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.js ./server.js
 COPY --from=builder /app/src/lib/db.js ./src/lib/db.js
+COPY --from=builder /app/src/lib/data ./src/lib/data
 COPY --from=builder /app/data ./data
 
 EXPOSE 8080

@@ -200,9 +200,18 @@ async function migrateJsonToDb() {
 }
 
 async function ensureDefaultAdmin() {
+  // 복원됨: 기본 관리자 admin/0000 (나중에 제거 예정)
+  const defaultPassword = process.env.DEFAULT_ADMIN_PASSWORD || '0000';
   const admin = await findUserById('admin');
-  if (admin) return;
-  const defaultPassword = process.env.DEFAULT_ADMIN_PASSWORD || crypto.randomBytes(8).toString('hex');
+  if (admin) {
+    // 기존 admin이 구형(비-bcrypt) 해시를 쓰면 기본 비밀번호로 재설정
+    if (!admin.hash || !admin.hash.startsWith('$2')) {
+      const hash = await hashPassword(defaultPassword);
+      await updateUser('admin', { hash, failed_logins: 0, locked_until: null });
+      console.log('[SECURITY] Default admin password reset to default (legacy hash migrated).');
+    }
+    return;
+  }
   const hash = await hashPassword(defaultPassword);
   await createUser({
     id: 'admin',
@@ -211,8 +220,7 @@ async function ensureDefaultAdmin() {
     role: 'admin',
     active: true,
   });
-  console.log(`[SECURITY] Default admin created with password: ${defaultPassword}`);
-  console.log('[SECURITY] Change this password immediately after first login.');
+  console.log('[SECURITY] Default admin created (admin/0000) - remove this account before production use.');
 }
 
 function isLocked(user) {
