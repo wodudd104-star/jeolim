@@ -26,6 +26,10 @@ import {
   commitDataFiles,
   recordFailedLogin,
   resetFailedLogins,
+  hasDb,
+  ensureKvTable,
+  kvGet,
+  kvSet,
 } from './src/lib/db.js';
 
 config();
@@ -86,9 +90,14 @@ const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24시간
 const SESSIONS_FILE = path.join(__dirname, 'data', 'sessions.json');
 const sessions = new Map();
 
-function loadSessions() {
+async function loadSessions() {
   try {
-    const raw = JSON.parse(fsSync.readFileSync(SESSIONS_FILE, 'utf-8'));
+    let raw = null;
+    if (hasDb()) {
+      raw = await kvGet('sessions');
+    } else {
+      raw = JSON.parse(fsSync.readFileSync(SESSIONS_FILE, 'utf-8'));
+    }
     const now = Date.now();
     for (const [token, session] of Object.entries(raw || {})) {
       if (session && session.expiresAt > now) {
@@ -96,22 +105,28 @@ function loadSessions() {
       }
     }
   } catch {
-    // 세션 파일 없음/손상 시 새로 시작
+    // 세션 저장소 없음/손상 시 새로 시작
   }
 }
 
 let sessionSaveTimer = null;
 function scheduleSessionSave() {
   if (sessionSaveTimer) return;
-  sessionSaveTimer = setTimeout(() => {
+  sessionSaveTimer = setTimeout(async () => {
     sessionSaveTimer = null;
     const obj = Object.fromEntries(sessions);
-    fsSync.mkdirSync(path.dirname(SESSIONS_FILE), { recursive: true });
-    fsSync.writeFileSync(SESSIONS_FILE, JSON.stringify(obj));
+    try {
+      if (hasDb()) {
+        await kvSet('sessions', obj);
+      } else {
+        fsSync.mkdirSync(path.dirname(SESSIONS_FILE), { recursive: true });
+        fsSync.writeFileSync(SESSIONS_FILE, JSON.stringify(obj));
+      }
+    } catch (err) {
+      console.error('[SESSION] 세션 저장 실패:', err.message);
+    }
   }, 500);
 }
-
-loadSessions();
 
 function createSession(userId, role) {
   const token = crypto.randomBytes(32).toString('hex');
@@ -694,34 +709,6 @@ const APP_DATA_KEYS = new Set([
   'gallery_notice',
 ]);
 
-app.get('/api/data/all', requireAuth, async (_req, res) => {
-  try {
-    const store = await readJsonSafe(APP_DATA_FILE, {});
-    const out = {};
-    for (const key of Object.keys(store)) {
-      if (APP_DATA_KEYS.has(key)) out[key] = store[key] ? store[key].value : undefined;
-    }
-    return res.json(out);
-  } catch {
-    return res.status(500).json({ error: '데이터 조회에 실패했습니다.' });
-  }
-});
-
-app.put('/api/data/:key', requireAuth, async (req, res) => {
-  try {
-    const key = req.params.key;
-    if (!APP_DATA_KEYS.has(key)) {
-      return res.status(400).json({ error: '지원하지 않는 데이터 키입니다.' });
-    }
-    const store = await readJsonSafe(APP_DATA_FILE, {});
-    store[key] = { value: req.body, savedAt: new Date().toISOString() };
-    await writeJsonSafe(APP_DATA_FILE, store);
-    return res.json({ ok: true });
-  } catch {
-    return res.status(500).json({ error: '데이터 저장에 실패했습니다.' });
-  }
-});
-
 // ===== 공유 주문 / 갤러리 스냅샷 (공개 조회용) =====
 const PUBLIC_ORDERS_FILE = path.join(__dirname, 'src/lib/data/public-orders.json');
 const PUBLIC_GALLERY_FILE = path.join(__dirname, 'src/lib/data/public-gallery.json');
@@ -739,6 +726,51 @@ async function writeJsonSafe(file, data) {
   await fs.writeFile(file, JSON.stringify(data, null, 2));
 }
 
+// DB(Supabase)가 연결되면 app_kv 테이블에 영구 저장, 아니면 로컬 JSON 폭백
+async function storeRead(kvKey, file, fallback) {
+  if (hasDb()) {
+    const value = await kvGet(kvKey);
+    return value === null || value === undefined ? fallback : value;
+  }
+  return readJsonSafe(file, fallback);
+}
+
+async function storeWrite(kvKey, file, data) {
+  if (hasDb()) {
+    await kvSet(kvKey, data);
+    return;
+  }
+  await writeJsonSafe(file, data);
+}
+
+app.get('/api/data/all', requireAuth, async (_req, res) => {
+  try {
+    const store = await storeRead('app_data', APP_DATA_FILE, {});
+    const out = {};
+    for (const key of Object.keys(store)) {
+      if (APP_DATA_KEYS.has(key)) out[key] = store[key] ? store[key].value : undefined;
+    }
+    return res.json(out);
+  } catch {
+    return res.status(500).json({ error: '데이터 조회에 실패했습니다.' });
+  }
+});
+
+app.put('/api/data/:key', requireAuth, async (req, res) => {
+  try {
+    const key = req.params.key;
+    if (!APP_DATA_KEYS.has(key)) {
+      return res.status(400).json({ error: '지원하지 않는 데이터 키입니다.' });
+    }
+    const store = await storeRead('app_data', APP_DATA_FILE, {});
+    store[key] = { value: req.body, savedAt: new Date().toISOString() };
+    await storeWrite('app_data', APP_DATA_FILE, store);
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '데이터 저장에 실패했습니다.' });
+  }
+});
+
 app.put('/api/public/order/:id', requireAuth, async (req, res) => {
   try {
     const snapshot = req.body;
@@ -748,10 +780,10 @@ app.put('/api/public/order/:id', requireAuth, async (req, res) => {
     if (snapshot.id !== req.params.id) {
       return res.status(400).json({ error: '주문 ID가 일치하지 않습니다.' });
     }
-    const store = await readJsonSafe(PUBLIC_ORDERS_FILE, { orders: {} });
+    const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
     if (!store.orders || typeof store.orders !== 'object') store.orders = {};
     store.orders[req.params.id] = snapshot;
-    await writeJsonSafe(PUBLIC_ORDERS_FILE, store);
+    await storeWrite('public_orders', PUBLIC_ORDERS_FILE, store);
     return res.json({ ok: true });
   } catch (err) {
     return res.status(500).json({ error: '주문 공유 저장에 실패했습니다.' });
@@ -760,7 +792,7 @@ app.put('/api/public/order/:id', requireAuth, async (req, res) => {
 
 app.get('/api/public/order/:id', async (req, res) => {
   try {
-    const store = await readJsonSafe(PUBLIC_ORDERS_FILE, { orders: {} });
+    const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
     const order = (store.orders || {})[req.params.id];
     if (!order) return res.status(404).json({ error: 'not found' });
     return res.json(order);
@@ -775,7 +807,7 @@ app.put('/api/public/gallery', requireAuth, async (req, res) => {
     if (!Array.isArray(items)) {
       return res.status(400).json({ error: '잘못된 요청입니다.' });
     }
-    await writeJsonSafe(PUBLIC_GALLERY_FILE, { items, notice: String(notice || '') });
+    await storeWrite('public_gallery', PUBLIC_GALLERY_FILE, { items, notice: String(notice || '') });
     return res.json({ ok: true });
   } catch {
     return res.status(500).json({ error: '갤러리 저장에 실패했습니다.' });
@@ -784,7 +816,7 @@ app.put('/api/public/gallery', requireAuth, async (req, res) => {
 
 app.get('/api/public/gallery', async (_req, res) => {
   try {
-    const data = await readJsonSafe(PUBLIC_GALLERY_FILE, null);
+    const data = await storeRead('public_gallery', PUBLIC_GALLERY_FILE, null);
     if (!data) return res.status(404).json({ error: 'not found' });
     return res.json(data);
   } catch {
@@ -805,7 +837,28 @@ const PORT = process.env.PORT || 3000;
     const dbUrlSet = !!process.env.DATABASE_URL;
     console.log(`[STARTUP] DATABASE_URL ${dbUrlSet ? 'is set' : 'is NOT set'} (storage: ${dbUrlSet ? 'PostgreSQL' : 'local JSON'})`);
     await ensureUsersTable();
+    await ensureKvTable();
+    await loadSessions();
     await migrateJsonToDb();
+    // DB 모드 첫 부팅 시 이미지에 포함된 JSON 데이터를 DB로 이관
+    if (hasDb()) {
+      for (const [kvKey, file, fallback] of [
+        ['app_data', APP_DATA_FILE, {}],
+        ['public_orders', PUBLIC_ORDERS_FILE, { orders: {} }],
+        ['public_gallery', PUBLIC_GALLERY_FILE, null],
+      ]) {
+        try {
+          const existing = await kvGet(kvKey);
+          if (existing === null || existing === undefined) {
+            const local = await readJsonSafe(file, null);
+            if (local !== null) await kvSet(kvKey, local);
+            else if (fallback !== null) await kvSet(kvKey, fallback);
+          }
+        } catch (err) {
+          console.error(`[MIGRATE] ${kvKey} 이관 실패:`, err.message);
+        }
+      }
+    }
     await ensureDefaultAdmin();
     const users = await listUsers();
     console.log(`Total users in storage: ${users.length}`);

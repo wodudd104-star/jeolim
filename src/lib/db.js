@@ -346,3 +346,37 @@ export async function resetFailedLogins(id) {
   user.locked_until = null;
   await saveJsonUsers(users);
 }
+
+// ===== 범용 키-값 저장소 (재배포 시에도 유지되는 영구 저장) =====
+export function hasDb() {
+  return !!initDb();
+}
+
+export async function ensureKvTable() {
+  const db = initDb();
+  if (!db) return;
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS app_kv (
+      key TEXT PRIMARY KEY,
+      value JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+export async function kvGet(key) {
+  const db = initDb();
+  if (!db) return null;
+  const result = await db.query('SELECT value FROM app_kv WHERE key = $1', [key]);
+  return result.rows[0] ? result.rows[0].value : null;
+}
+
+export async function kvSet(key, value) {
+  const db = initDb();
+  if (!db) return;
+  await db.query(
+    `INSERT INTO app_kv (key, value, updated_at) VALUES ($1, $2, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [key, JSON.stringify(value)]
+  );
+}
