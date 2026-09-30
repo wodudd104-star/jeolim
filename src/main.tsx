@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as XLSX from 'xlsx';
 import './style.css';
-import { sendSms } from './lib/api';
+import { sendSms, syncPublicOrder, fetchPublicOrder } from './lib/api';
 import { load, save } from './lib/storage';
 import { compressImage } from './lib/images';
 import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page, Customer } from './types';
@@ -12,7 +12,13 @@ import Admin, { AccountManager, getStoredAccountNumber } from './components/Admi
 import Dashboard from './components/Dashboard';
 import Gallery, { PublicGallery } from './components/Gallery';
 
-const STATUS_LIST: OrderStatus[] = ['접수', '준비중', '완료', '취소'];
+const STATUS_LIST: OrderStatus[] = ['접수', '준비중', '택배', '현장수령', '완료', '취소'];
+const STATUS_FLOW: Partial<Record<OrderStatus, OrderStatus>> = {
+  접수: '준비중',
+  준비중: '택배',
+  택배: '현장수령',
+  현장수령: '완료',
+};
 const PICKUP_LIST: PickupType[] = ['매장방문', '배송'];
 const COURIER_LIST = [
   'CJ대한통운',
@@ -99,6 +105,8 @@ function normalizePickup(value: string): PickupType {
 
 function normalizeStatus(value: string): OrderStatus {
   const text = String(value).trim();
+  if (text.includes('현장')) return '현장수령';
+  if (text.includes('택배')) return '택배';
   if (text.includes('완료')) return '완료';
   if (text.includes('준비')) return '준비중';
   if (text.includes('취소')) return '취소';
@@ -142,6 +150,8 @@ const emptyOrder: Omit<Order, 'id' | 'createdAt'> = {
   deposit: false,
   courier: '',
   trackingNumber: '',
+  reservationTime: '',
+  statusMemo: '',
 };
 
 export default function App() {
@@ -341,6 +351,23 @@ export default function App() {
   function updatePreparationDate(id: string, date: string) {
     setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, preparationDate: date } : o)));
   }
+
+  function updateOrderFields(id: string, patch: Partial<Order>) {
+    setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, ...patch } : o)));
+  }
+
+  // 공유(링크 발급)된 주문은 서버에 자동 동기화 → 상대방이 실시간으로 확인 가능
+  useEffect(() => {
+    if (!loggedIn) return;
+    const shared = orders.filter((o) => o.shared);
+    if (shared.length === 0) return;
+    const timer = setTimeout(() => {
+      shared.forEach((o) => {
+        syncPublicOrder(o).catch(() => {});
+      });
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [orders, loggedIn]);
 
   function toggleDeposit(id: string) {
     setOrders((prev) =>
@@ -571,9 +598,18 @@ export default function App() {
 
   async function copyOrderUrl(order: Order) {
     const url = getOrderPublicUrl(order.id);
+    // 링크 공유 시작: 이후 이 주문의 변경사항은 서버로 실시간 동기화됨
+    if (!order.shared) {
+      setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, shared: true } : o)));
+    }
+    try {
+      await syncPublicOrder({ ...order, shared: true });
+    } catch {
+      // 동기화 실패해도 링크 복사는 진행 (로컬에서만 동작)
+    }
     try {
       await navigator.clipboard.writeText(url);
-      alert('주문 조회 링크가 복사되었습니다.');
+      alert('주문 조회 링크가 복사되었습니다.\n상대방은 진행 상황을 실시간으로 확인할 수 있습니다.');
     } catch {
       prompt('주문 조회 링크를 복사해주세요.', url);
     }
@@ -585,7 +621,7 @@ export default function App() {
   const publicOrder = publicOrderId ? orders.find((o) => o.id === publicOrderId) : undefined;
 
   if (publicOrderId) {
-    return <PublicOrderView order={publicOrder} />;
+    return <PublicOrderView orderId={publicOrderId} localOrder={publicOrder} />;
   }
 
   if (publicGallery) {
@@ -942,11 +978,24 @@ export default function App() {
                         className='input'
                         type='date'
                         value={form.pickupDate}
-                        onChange={(e) => setForm({ ...form, pickupDate: e.target.value })}
+                        onChange={(e) => {
+                          const pickupDate = e.target.value;
+                          // 희망일 입력 시 준비일 자동 설정 (4일 전)
+                          const preparationDate = pickupDate
+                            ? new Date(new Date(pickupDate).getTime() - 4 * 86400000)
+                                .toISOString()
+                                .slice(0, 10)
+                            : '';
+                          setForm((prev) => ({
+                            ...prev,
+                            pickupDate,
+                            preparationDate: preparationDate || prev.preparationDate,
+                          }));
+                        }}
                       />
                     </label>
                     <label>
-                      준비일 (접수→준비중 전환일)
+                      준비일 (희망일 4일 전 자동 입력)
                       <input
                         className='input'
                         type='date'
@@ -969,34 +1018,6 @@ export default function App() {
                           </button>
                         </div>
                       </label>
-                    )}
-                    {form.pickup === '배송' && (
-                      <>
-                        <label>
-                          택배사 (선택)
-                          <select
-                            className='select'
-                            value={form.courier || ''}
-                            onChange={(e) => setForm({ ...form, courier: e.target.value })}
-                          >
-                            <option value=''>택배사 선택</option>
-                            {COURIER_LIST.map((c) => (
-                              <option key={c} value={c}>
-                                {c}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
-                          운송장번호 (선택)
-                          <input
-                            className='input'
-                            value={form.trackingNumber || ''}
-                            onChange={(e) => setForm({ ...form, trackingNumber: e.target.value })}
-                            placeholder='숫자 또는 운송장번호 입력'
-                          />
-                        </label>
-                      </>
                     )}
                     <label className='full'>
                       메모
@@ -1076,9 +1097,18 @@ export default function App() {
                           <button className='btn icon' onClick={() => handlePrint(order)} title='영수증 인쇄'>
                             🖨
                           </button>
-                          <button className='btn icon' onClick={() => copyOrderUrl(order)} title='주문 조회 링크 복사'>
+                          <button className='btn icon' onClick={() => copyOrderUrl(order)} title='주문 조회 링크 복사 (실시간 공유)'>
                             🔗
                           </button>
+                          {STATUS_FLOW[order.status] && (
+                            <button
+                              className='btn status-next-btn'
+                              onClick={() => updateStatus(order.id, STATUS_FLOW[order.status]!)}
+                              title='다음 단계로 진행'
+                            >
+                              → {STATUS_FLOW[order.status]}
+                            </button>
+                          )}
                           <select
                             className='select status-select'
                             value={order.status}
@@ -1135,24 +1165,66 @@ export default function App() {
                         </div>
                       {order.memo && <p className='order-memo'>{order.memo}</p>}
                       </div>
+                      {order.status === '택배' && isAdmin() && (
+                        <StatusDetailEditor
+                          key={`courier-${order.id}-${order.courier}-${order.trackingNumber}-${order.statusMemo}`}
+                          mode='택배'
+                          order={order}
+                          onSave={(patch) => {
+                            updateOrderFields(order.id, patch);
+                            alert('저장되었습니다.');
+                          }}
+                        />
+                      )}
+                      {order.status === '현장수령' && isAdmin() && (
+                        <StatusDetailEditor
+                          key={`visit-${order.id}-${order.reservationTime}-${order.statusMemo}`}
+                          mode='현장수령'
+                          order={order}
+                          onSave={(patch) => {
+                            updateOrderFields(order.id, patch);
+                            alert('저장되었습니다.');
+                          }}
+                        />
+                      )}
                       {order.status === '완료' && isAdmin() && (
                         <div className='order-photos'>
                           <div className='order-photos-head'>
                             <span className='order-photos-title'>
                               📷 완료 사진 ({(order.photos || []).length}/{MAX_ORDER_PHOTOS})
                             </span>
-                            {(order.photos || []).length < MAX_ORDER_PHOTOS && (
-                              <label className='btn small order-photo-add'>
-                                사진 추가
-                                <input
-                                  type='file'
-                                  accept='image/*'
-                                  multiple
-                                  style={{ display: 'none' }}
-                                  onChange={(e) => handleOrderPhotoSelect(order.id, e)}
-                                />
-                              </label>
-                            )}
+                            <div className='order-photos-actions'>
+                              {(order.photos || []).length < MAX_ORDER_PHOTOS && (
+                                <label className='btn small order-photo-add'>
+                                  사진 추가
+                                  <input
+                                    type='file'
+                                    accept='image/*'
+                                    multiple
+                                    style={{ display: 'none' }}
+                                    onChange={(e) => handleOrderPhotoSelect(order.id, e)}
+                                  />
+                                </label>
+                              )}
+                              <button
+                                type='button'
+                                className='btn small btn-primary order-photo-save'
+                                onClick={async () => {
+                                  if (!order.shared) {
+                                    alert('사진이 저장되었습니다.');
+                                    return;
+                                  }
+                                  try {
+                                    await syncPublicOrder(order);
+                                    alert('사진이 저장되었습니다.\n공유 링크에서도 즉시 확인할 수 있습니다.');
+                                  } catch {
+                                    alert('사진은 저장되었지만 서버 동기화에 실패했습니다.');
+                                  }
+                                }}
+                              >
+                                저장
+                              </button>
+                            </div>
                           </div>
                           {(order.photos || []).length > 0 && (
                             <div className='order-photo-list'>
@@ -1311,14 +1383,126 @@ function Receipt({ order }: { order: Order }) {
   );
 }
 
-function PublicOrderView({ order }: { order: Order | undefined }) {
+function StatusDetailEditor({
+  mode,
+  order,
+  onSave,
+}: {
+  mode: '택배' | '현장수령';
+  order: Order;
+  onSave: (patch: Partial<Order>) => void;
+}) {
+  const [courier, setCourier] = useState(order.courier || '');
+  const [trackingNumber, setTrackingNumber] = useState(order.trackingNumber || '');
+  const [reservationTime, setReservationTime] = useState(order.reservationTime || '');
+  const [statusMemo, setStatusMemo] = useState(order.statusMemo || '');
+
+  return (
+    <div className='status-detail-box'>
+      <span className='status-detail-title'>
+        {mode === '택배' ? '🚚 택배 정보' : '🏪 현장수령 정보'}
+      </span>
+      <div className='status-detail-grid'>
+        {mode === '택배' ? (
+          <>
+            <label>
+              택배사
+              <select
+                className='select'
+                value={courier}
+                onChange={(e) => setCourier(e.target.value)}
+              >
+                <option value=''>택배사 선택</option>
+                {COURIER_LIST.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              운송장번호
+              <input
+                className='input'
+                value={trackingNumber}
+                onChange={(e) => setTrackingNumber(e.target.value)}
+                placeholder='운송장번호 입력'
+              />
+            </label>
+          </>
+        ) : (
+          <label>
+            예약시간
+            <input
+              className='input'
+              type='time'
+              value={reservationTime}
+              onChange={(e) => setReservationTime(e.target.value)}
+            />
+          </label>
+        )}
+        <label className='full'>
+          메모
+          <input
+            className='input'
+            value={statusMemo}
+            onChange={(e) => setStatusMemo(e.target.value)}
+            placeholder={mode === '택배' ? '택배 관련 메모' : '현장수령 관련 메모'}
+          />
+        </label>
+      </div>
+      <div className='status-detail-actions'>
+        <button
+          type='button'
+          className='btn small btn-primary'
+          onClick={() =>
+            onSave(
+              mode === '택배'
+                ? { courier, trackingNumber, statusMemo }
+                : { reservationTime, statusMemo }
+            )
+          }
+        >
+          저장
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?: Order }) {
+  const [order, setOrder] = useState<Order | undefined>(localOrder);
+  const [checked, setChecked] = useState(false);
+
+  // 서버에서 주문 스냅샷을 폴링하여 진행 상황을 실시간 표시
+  useEffect(() => {
+    let alive = true;
+    async function poll() {
+      try {
+        const remote = await fetchPublicOrder(orderId);
+        if (alive && remote) setOrder(remote);
+      } catch {
+        // 무시
+      }
+      if (alive) setChecked(true);
+    }
+    poll();
+    const timer = setInterval(poll, 5000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [orderId]);
+
   if (!order) {
     return (
       <div className='app-shell'>
         <div className='container'>
           <div className='panel public-order'>
             <h2>주문 조회</h2>
-            <p className='empty'>해당 주문을 찾을 수 없습니다.</p>
+            <p className='empty'>
+              {checked ? '해당 주문을 찾을 수 없습니다.' : '주문 정보를 불러오는 중...'}
+            </p>
           </div>
         </div>
       </div>
@@ -1326,8 +1510,8 @@ function PublicOrderView({ order }: { order: Order | undefined }) {
   }
 
   const balance = order.totalPrice - order.depositAmount;
-  const steps = ['접수', '준비중', '완료'];
-  const stepIndex = steps.indexOf(order.status === '취소' ? '접수' : order.status);
+  const steps: OrderStatus[] = ['접수', '준비중', '택배', '현장수령', '완료'];
+  const stepIndex = steps.indexOf(order.status === '취소' ? '접수' : (order.status as OrderStatus));
 
   return (
     <div className='app-shell'>
@@ -1421,9 +1605,21 @@ function PublicOrderView({ order }: { order: Order | undefined }) {
                 <span>{order.trackingNumber}</span>
               </div>
             )}
-            {order.memo && (
+            {order.reservationTime && (
+              <div className='info-row'>
+                <span>예약시간</span>
+                <span>{order.reservationTime}</span>
+              </div>
+            )}
+            {order.statusMemo && (
               <div className='info-row'>
                 <span>메모</span>
+                <span>{order.statusMemo}</span>
+              </div>
+            )}
+            {order.memo && (
+              <div className='info-row'>
+                <span>주문 메모</span>
                 <span>{order.memo}</span>
               </div>
             )}
@@ -1433,7 +1629,19 @@ function PublicOrderView({ order }: { order: Order | undefined }) {
             </div>
           </div>
 
+          {order.status === '완료' && (order.photos || []).length > 0 && (
+            <div className='public-photos'>
+              <h3 className='public-photos-title'>📷 완료 사진</h3>
+              <div className='public-photos-grid'>
+                {(order.photos || []).map((photo, idx) => (
+                  <img key={idx} src={photo} alt={`완료 사진 ${idx + 1}`} />
+                ))}
+              </div>
+            </div>
+          )}
+
           <p className='public-order-thanks'>이용해주셔서 감사합니다.</p>
+          <p className='public-refresh-hint'>이 화면은 5초마다 자동으로 최신 상태를 불러옵니다.</p>
         </div>
       </div>
     </div>

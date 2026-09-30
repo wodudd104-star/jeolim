@@ -1,4 +1,4 @@
-export type OrderStatus = '접수' | '준비중' | '완료' | '취소';
+export type OrderStatus = '접수' | '준비중' | '택배' | '현장수령' | '완료' | '취소';
 export type PickupType = '매장방문' | '배송';
 export type PaymentStatus = '미납' | '부분납' | '완납';
 
@@ -31,6 +31,9 @@ export type Order = {
   courier?: string;
   trackingNumber?: string;
   photos?: string[];
+  reservationTime?: string;
+  statusMemo?: string;
+  shared?: boolean;
 };
 
 export type Customer = {

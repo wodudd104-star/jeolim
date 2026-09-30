@@ -511,6 +511,165 @@ h1 {
   white-space: pre-wrap;
 }
 
+.status-next-btn {
+  font-weight: 700;
+  background: #ecfdf5;
+  border-color: #6ee7b7;
+  color: #065f46;
+  white-space: nowrap;
+}
+
+.status-next-btn:hover {
+  background: #d1fae5;
+}
+
+.status-detail-box {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #bfdbfe;
+  background: #eff6ff;
+  border-radius: 8px;
+}
+
+.status-detail-title {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 800;
+  color: #1e40af;
+  margin-bottom: 8px;
+}
+
+.status-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.status-detail-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #374151;
+}
+
+.status-detail-grid .full {
+  grid-column: 1 / -1;
+}
+
+.status-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.order-photos-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.public-photos {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed #e5e7eb;
+}
+
+.public-photos-title {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: #374151;
+}
+
+.public-photos-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.public-photos-grid img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
+.public-refresh-hint {
+  margin: 8px 0 0;
+  font-size: 0.75rem;
+  color: #9ca3af;
+  text-align: center;
+}
+
+.gallery-notice-section {
+  margin-top: 8px;
+}
+
+.gallery-notice-label {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: #b45309;
+  margin-bottom: 6px;
+}
+
+.gallery-notice-textarea {
+  width: 100%;
+  font-size: 0.9rem;
+  resize: vertical;
+}
+
+.gallery-notice-box {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  color: #92400e;
+  white-space: pre-wrap;
+}
+
+.gallery-final {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.gallery-final-btn {
+  align-self: flex-start;
+  padding: 12px 24px;
+  font-size: 1rem;
+}
+
+.gallery-url-box {
+  padding: 14px;
+  background: #f0fdf4;
+  border: 1px solid #86efac;
+  border-radius: 8px;
+}
+
+.gallery-url-label {
+  margin: 0 0 8px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #166534;
+}
+
+.gallery-url-row {
+  display: flex;
+  gap: 8px;
+}
+
+.gallery-url-input {
+  flex: 1;
+  font-size: 0.8rem;
+  color: #374151;
+}
+
 .panel {
   border: 1px solid #e5e7eb;
   border-radius: var(--radius);
@@ -584,6 +743,14 @@ h1 {
 
 .order-card.status-접수 {
   border-left-color: #3b82f6;
+}
+
+.order-card.status-택배 {
+  border-left-color: #8b5cf6;
+}
+
+.order-card.status-현장수령 {
+  border-left-color: #0ea5e9;
 }
 
 .order-card.status-준비중 {
@@ -691,6 +858,8 @@ h1 {
 
 .status-box.status-접수 { background: #eff6ff; border-color: #bfdbfe; }
 .status-box.status-준비중 { background: #fffbeb; border-color: #fde68a; }
+.status-box.status-택배 { background: #f5f3ff; border-color: #ddd6fe; }
+.status-box.status-현장수령 { background: #f0f9ff; border-color: #bae6fd; }
 .status-box.status-완료 { background: #ecfdf5; border-color: #a7f3d0; }
 .status-box.status-취소 { background: #f3f4f6; border-color: #d1d5db; }
 
@@ -1759,5 +1928,7 @@ h1 {
 
 .tag.status-접수 { background: #dbeafe; color: #1e40af; }
 .tag.status-준비중 { background: #fef3c7; color: #92400e; }
+.tag.status-택배 { background: #ede9fe; color: #5b21b6; }
+.tag.status-현장수령 { background: #e0f2fe; color: #075985; }
 .tag.status-완료 { background: #d1fae5; color: #065f46; }
 .tag.status-취소 { background: #f3f4f6; color: #374151; }

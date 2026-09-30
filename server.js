@@ -33,7 +33,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
 app.use(cookieParser());
 app.set('trust proxy', 1);
 
@@ -647,6 +647,76 @@ app.post('/api/send-sms', requireAuth, async (req, res) => {
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
+});
+
+// ===== 공유 주문 / 갤러리 스냅샷 (공개 조회용) =====
+const PUBLIC_ORDERS_FILE = path.join(__dirname, 'src/lib/data/public-orders.json');
+const PUBLIC_GALLERY_FILE = path.join(__dirname, 'src/lib/data/public-gallery.json');
+
+async function readJsonSafe(file, fallback) {
+  try {
+    return JSON.parse(await fs.readFile(file, 'utf-8'));
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeJsonSafe(file, data) {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(data, null, 2));
+}
+
+app.put('/api/public/order/:id', requireAuth, async (req, res) => {
+  try {
+    const snapshot = req.body;
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      return res.status(400).json({ error: '잘못된 요청입니다.' });
+    }
+    if (snapshot.id !== req.params.id) {
+      return res.status(400).json({ error: '주문 ID가 일치하지 않습니다.' });
+    }
+    const store = await readJsonSafe(PUBLIC_ORDERS_FILE, { orders: {} });
+    if (!store.orders || typeof store.orders !== 'object') store.orders = {};
+    store.orders[req.params.id] = snapshot;
+    await writeJsonSafe(PUBLIC_ORDERS_FILE, store);
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: '주문 공유 저장에 실패했습니다.' });
+  }
+});
+
+app.get('/api/public/order/:id', async (req, res) => {
+  try {
+    const store = await readJsonSafe(PUBLIC_ORDERS_FILE, { orders: {} });
+    const order = (store.orders || {})[req.params.id];
+    if (!order) return res.status(404).json({ error: 'not found' });
+    return res.json(order);
+  } catch {
+    return res.status(500).json({ error: '주문 조회에 실패했습니다.' });
+  }
+});
+
+app.put('/api/public/gallery', requireAuth, async (req, res) => {
+  try {
+    const { items, notice } = req.body || {};
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ error: '잘못된 요청입니다.' });
+    }
+    await writeJsonSafe(PUBLIC_GALLERY_FILE, { items, notice: String(notice || '') });
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '갤러리 저장에 실패했습니다.' });
+  }
+});
+
+app.get('/api/public/gallery', async (_req, res) => {
+  try {
+    const data = await readJsonSafe(PUBLIC_GALLERY_FILE, null);
+    if (!data) return res.status(404).json({ error: 'not found' });
+    return res.json(data);
+  } catch {
+    return res.status(500).json({ error: '갤러리 조회에 실패했습니다.' });
+  }
 });
 
 app.use(express.static(path.join(__dirname, 'dist')));

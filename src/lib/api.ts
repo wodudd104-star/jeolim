@@ -8,6 +8,44 @@ function getHeaders(): Record<string, string> {
   return { 'Content-Type': 'application/json' };
 }
 
+export async function syncPublicOrder(order: unknown) {
+  const res = await fetch(getUrl(`/api/public/order/${encodeURIComponent((order as any).id)}`), {
+    method: 'PUT',
+    headers: getHeaders(),
+    body: JSON.stringify(order),
+    credentials: 'include',
+  });
+  if (!res.ok) throw new Error('주문 공유 동기화 실패');
+  return res.json();
+}
+
+export async function fetchPublicOrder(id: string) {
+  const res = await fetch(getUrl(`/api/public/order/${encodeURIComponent(id)}`), {
+    credentials: 'include',
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function syncPublicGallery(items: unknown[], notice: string) {
+  const res = await fetch(getUrl('/api/public/gallery'), {
+    method: 'PUT',
+    headers: getHeaders(),
+    body: JSON.stringify({ items, notice }),
+    credentials: 'include',
+  });
+  if (!res.ok) throw new Error('갤러리 공유 동기화 실패');
+  return res.json();
+}
+
+export async function fetchPublicGallery() {
+  const res = await fetch(getUrl('/api/public/gallery'), {
+    credentials: 'include',
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
 export async function sendSms(recipients: string[], message: string) {
   const res = await fetch(getUrl('/api/send-sms'), {
     method: 'POST',

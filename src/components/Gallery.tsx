@@ -1,9 +1,11 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { GalleryItem } from '../types';
 import { load, save } from '../lib/storage';
 import { compressImage, saveSafely } from '../lib/images';
+import { syncPublicGallery, fetchPublicGallery } from '../lib/api';
 
 const GALLERY_KEY = 'jc_gallery_v1';
+const GALLERY_NOTICE_KEY = 'jc_gallery_notice_v1';
 const MAX_GALLERY_PHOTOS = 10;
 
 export function getGalleryPublicUrl() {
@@ -20,8 +22,36 @@ export function saveGallery(items: GalleryItem[]) {
   save(GALLERY_KEY, items);
 }
 
+export function loadGalleryNotice(): string {
+  return load(GALLERY_NOTICE_KEY, '');
+}
+
+export function saveGalleryNotice(notice: string) {
+  save(GALLERY_NOTICE_KEY, notice);
+}
+
 export function PublicGallery() {
-  const [items] = useState<GalleryItem[]>(() => loadGallery());
+  const [items, setItems] = useState<GalleryItem[]>(() => loadGallery());
+  const [notice, setNotice] = useState(() => loadGalleryNotice());
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const remote = await fetchPublicGallery();
+        if (alive && remote && Array.isArray(remote.items)) {
+          setItems(remote.items);
+          setNotice(String(remote.notice || ''));
+        }
+      } catch {
+        // 로컬 데이터 유지
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   return (
     <div className='app-shell'>
       <div className='container'>
@@ -29,6 +59,7 @@ export function PublicGallery() {
           <header className='public-order-header'>
             <h2>절임배추 사진</h2>
           </header>
+          {notice && <div className='gallery-notice-box public'>{notice}</div>}
           {items.length === 0 ? (
             <p className='empty'>등록된 사진이 없습니다.</p>
           ) : (
@@ -51,19 +82,11 @@ export function PublicGallery() {
 
 export default function Gallery() {
   const [items, setItems] = useState<GalleryItem[]>(() => loadGallery());
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [notice, setNotice] = useState(() => loadGalleryNotice());
+  const inputRef = useRef<HTMLInputElement>(null);
   const [copied, setCopied] = useState(false);
-
-  async function copyGalleryUrl() {
-    const url = getGalleryPublicUrl();
-    try {
-      await navigator.clipboard.writeText(url);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      prompt('아래 URL을 복사해주세요.', url);
-    }
-  }
+  const [generatedUrl, setGeneratedUrl] = useState('');
+  const [generating, setGenerating] = useState(false);
 
   function commitItems(next: GalleryItem[]) {
     setItems(next);
@@ -72,13 +95,18 @@ export default function Gallery() {
     }
   }
 
+  function commitNotice(next: string) {
+    setNotice(next);
+    saveGalleryNotice(next);
+  }
+
   async function handlePhotoSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
     const remaining = MAX_GALLERY_PHOTOS - items.length;
     if (remaining <= 0) {
       alert(`사진은 최대 ${MAX_GALLERY_PHOTOS}장까지 등록할 수 있습니다.`);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (inputRef.current) inputRef.current.value = '';
       return;
     }
     const targets = files.slice(0, remaining);
@@ -96,7 +124,7 @@ export default function Gallery() {
     } catch (err: any) {
       alert(err.message || '이미지를 처리하는 중 오류가 발생했습니다.');
     } finally {
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      if (inputRef.current) inputRef.current.value = '';
     }
   }
 
@@ -117,6 +145,42 @@ export default function Gallery() {
     commitItems(next);
   }
 
+  // 완료 버튼: 서버에 사진+유의사항을 저장하고 공개 URL 생성
+  async function finalizeGallery() {
+    if (items.length === 0) {
+      alert('등록된 사진이 없습니다. 사진을 먼저 추가해주세요.');
+      return;
+    }
+    setGenerating(true);
+    try {
+      await syncPublicGallery(items, notice);
+      const url = getGalleryPublicUrl();
+      setGeneratedUrl(url);
+      try {
+        await navigator.clipboard.writeText(url);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch {
+        // 클립보드 실패 시 URL 표시만
+      }
+    } catch {
+      alert('URL 생성에 실패했습니다. 잠시 후 다시 시도해주세요.');
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function copyUrl() {
+    const url = generatedUrl || getGalleryPublicUrl();
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      prompt('아래 URL을 복사해주세요.', url);
+    }
+  }
+
   return (
     <div className='gallery-shell'>
       <header className='app-header'>
@@ -125,18 +189,13 @@ export default function Gallery() {
           <h1>사진 등록</h1>
         </div>
         <div className='header-actions'>
-          {items.length > 0 && (
-            <button className='btn' onClick={copyGalleryUrl}>
-              {copied ? '✓ URL 복사됨' : '🔗 URL 복사'}
-            </button>
-          )}
           {items.length < MAX_GALLERY_PHOTOS && (
-            <button className='btn btn-primary' onClick={() => fileInputRef.current?.click()}>
+            <button className='btn btn-primary' onClick={() => inputRef.current?.click()}>
               📷 사진 추가 ({items.length}/{MAX_GALLERY_PHOTOS})
             </button>
           )}
           <input
-            ref={fileInputRef}
+            ref={inputRef}
             type='file'
             accept='image/*'
             multiple
@@ -148,7 +207,8 @@ export default function Gallery() {
 
       <p className='panel-hint gallery-hint'>
         사진은 선택사항이며 최대 {MAX_GALLERY_PHOTOS}장까지 등록할 수 있습니다. 각 사진 아래에
-        설명이나 주의사항을 적을 수 있고, ◀ ▶ 버튼으로 순서를 변경할 수 있습니다.
+        설명이나 주의사항을 적을 수 있고, ◀ ▶ 버튼으로 순서를 변경할 수 있습니다. 등록이 끝나면
+        맨 아래 [완료] 버튼을 눌러 URL을 생성하세요.
       </p>
 
       {items.length === 0 ? (
@@ -197,6 +257,40 @@ export default function Gallery() {
           ))}
         </div>
       )}
+
+      <div className='gallery-notice-section'>
+        <label className='gallery-notice-label'>⚠️ 유의사항</label>
+        <textarea
+          className='input gallery-notice-textarea'
+          rows={4}
+          value={notice}
+          onChange={(e) => commitNotice(e.target.value)}
+          placeholder='유의사항을 입력하세요 (선택). 완료 후 공개 화면 맨 위에 표시됩니다.'
+        />
+      </div>
+
+      <div className='gallery-final'>
+        <button
+          className='btn btn-primary gallery-final-btn'
+          onClick={finalizeGallery}
+          disabled={generating}
+        >
+          {generating ? 'URL 생성 중...' : '✅ 완료 (URL 생성)'}
+        </button>
+        {generatedUrl && (
+          <div className='gallery-url-box'>
+            <p className='gallery-url-label'>
+              공개 URL이 생성되었습니다. 아래 버튼으로 복사하여 전달하세요.
+            </p>
+            <div className='gallery-url-row'>
+              <input className='input gallery-url-input' readOnly value={generatedUrl} />
+              <button className='btn btn-primary' onClick={copyUrl}>
+                {copied ? '✓ 복사됨' : 'URL 복사'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
