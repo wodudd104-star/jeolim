@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { load, save } from '../lib/storage';
-import { supabase } from '../lib/supabase';
 import {
   activateUser,
   createUser,
@@ -9,10 +8,14 @@ import {
   demoteUser,
   fetchUsers,
   promoteUser,
+  updateServerAuth,
 } from '../lib/api';
 
-const AUTH_USER_KEY = 'jc_auth_user_v1';
-const ACCOUNT_NUMBERS_KEY = 'jc_accounts';
+const AUTH_USER_KEY = 'jeolim-auth-user-v1';
+const ORDERS_KEY = 'jeolim-cabbage-orders-v3';
+const CUSTOMERS_KEY = 'jeolim-cabbage-customers-v1';
+const PRODUCTS_KEY = 'jeolim-cabbage-products-v1';
+const ACCOUNT_NUMBERS_KEY = 'jeolim-cabbage-account-numbers';
 
 export type AdminAuth = {
   id: string;
@@ -148,10 +151,12 @@ export function AccountManager() {
 }
 
 export default function Admin() {
-  const [currentUser, setCurrentUser] = useState(() => getStoredUser() || { id: '', role: 'admin', email: '' });
+  const [currentUser] = useState(() => getStoredUser() || { id: '', role: 'admin', email: '' });
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newId, setNewId] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [email, setEmail] = useState(currentUser.email || '');
+  const [email, setEmail] = useState('');
   const [message, setMessage] = useState('');
 
   const [users, setUsers] = useState<
@@ -160,9 +165,10 @@ export default function Admin() {
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [addForm, setAddForm] = useState({
-    email: '',
+    id: '',
     password: '',
     confirm: '',
+    email: '',
     role: 'user',
     active: true,
   });
@@ -186,6 +192,18 @@ export default function Admin() {
   async function handleCredentialsChange(e: React.FormEvent) {
     e.preventDefault();
     setMessage('');
+    if (!currentUser) {
+      setMessage('로그인 정보가 없습니다.');
+      return;
+    }
+    if (!currentPassword.trim()) {
+      setMessage('현재 비밀번호를 입력해주세요.');
+      return;
+    }
+    if (!newId.trim()) {
+      setMessage('새 아이디를 입력해주세요.');
+      return;
+    }
     if (!newPassword.trim()) {
       setMessage('새 비밀번호를 입력해주세요.');
       return;
@@ -200,26 +218,17 @@ export default function Admin() {
     }
 
     try {
-      const updates: { email?: string; password?: string } = {};
-      if (email !== currentUser.email) updates.email = email;
-      updates.password = newPassword;
-
-      const { error, data } = await supabase.auth.updateUser(updates);
-      if (error) throw error;
-
-      const next = {
-        id: data.user?.id || currentUser.id,
-        role: currentUser.role,
-        email: data.user?.email || email,
-      };
-      setStoredUser(next);
-      setCurrentUser(next);
+      await updateServerAuth(currentUser.id, currentPassword, newId, newPassword, email);
+      setStoredUser({ id: newId, role: currentUser.role, email });
+      setCurrentPassword('');
+      setNewId('');
       setNewPassword('');
       setConfirmPassword('');
-      setMessage('비밀번호/이메일이 변경되었습니다.');
+      setEmail('');
+      setMessage('아이디, 비밀번호, 이메일이 변경되었습니다.');
       loadUserList();
     } catch (err: any) {
-      setMessage(err.message || '계정 정보 수정 중 오류가 발생했습니다.');
+      setMessage(err.message || '서버 연동 중 오류가 발생했습니다.');
     }
   }
 
@@ -257,12 +266,8 @@ export default function Admin() {
   async function handleAddUser(e: React.FormEvent) {
     e.preventDefault();
     setMessage('');
-    if (!addForm.email.trim() || !addForm.email.includes('@')) {
-      setMessage('올바른 이메일을 입력해주세요.');
-      return;
-    }
-    if (!addForm.password.trim()) {
-      setMessage('비밀번호를 입력해주세요.');
+    if (!addForm.id.trim() || !addForm.password.trim() || !addForm.email.trim()) {
+      setMessage('아이디, 비밀번호, 이메일을 모두 입력해주세요.');
       return;
     }
     if (addForm.password !== addForm.confirm) {
@@ -270,8 +275,8 @@ export default function Admin() {
       return;
     }
     try {
-      await createUser(addForm.email, addForm.password, addForm.role, addForm.active);
-      setAddForm({ email: '', password: '', confirm: '', role: 'user', active: true });
+      await createUser(addForm.id, addForm.password, addForm.email, addForm.role, addForm.active);
+      setAddForm({ id: '', password: '', confirm: '', email: '', role: 'user', active: true });
       setIsAddOpen(false);
       loadUserList();
     } catch (err: any) {
@@ -280,7 +285,7 @@ export default function Admin() {
   }
 
   async function removeUser(user: typeof users[number]) {
-    if (!confirm(`'${user.email}' 계정을 삭제할까요?`)) return;
+    if (!confirm(`'${user.id}' 계정을 삭제할까요?`)) return;
     try {
       await deleteUser(user.id);
       loadUserList();
@@ -289,23 +294,17 @@ export default function Admin() {
     }
   }
 
-  async function clearAllData() {
+  function clearAllData() {
     if (
       confirm(
         '정말 모든 데이터를 삭제할까요?\n주문, 고객, 품목 설정이 모두 사라집니다.'
       )
     ) {
-      try {
-        await Promise.all([
-          supabase.from('orders').delete().neq('id', ''),
-          supabase.from('customers').delete().neq('id', ''),
-          supabase.from('products').delete().neq('id', ''),
-        ]);
-        alert('모든 데이터가 삭제되었습니다. 페이지를 새로고침합니다.');
-        window.location.reload();
-      } catch (err: any) {
-        alert(err.message || '데이터 삭제에 실패했습니다.');
-      }
+      localStorage.removeItem(ORDERS_KEY);
+      localStorage.removeItem(CUSTOMERS_KEY);
+      localStorage.removeItem(PRODUCTS_KEY);
+      alert('모든 데이터가 삭제되었습니다. 페이지를 새로고침합니다.');
+      window.location.reload();
     }
   }
 
@@ -331,16 +330,26 @@ export default function Admin() {
       </section>
 
       <section className='panel'>
-        <h2>비밀번호 / 이메일 변경</h2>
+        <h2>아이디 / 비밀번호 / 이메일 변경</h2>
         <form onSubmit={handleCredentialsChange} className='admin-form'>
           <label>
-            이메일
+            현재 비밀번호
             <input
-              type='email'
+              type='password'
               className='input'
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder='이메일'
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              placeholder='현재 비밀번호'
+            />
+          </label>
+          <label>
+            새 아이디
+            <input
+              type='text'
+              className='input'
+              value={newId}
+              onChange={(e) => setNewId(e.target.value)}
+              placeholder='새 아이디'
             />
           </label>
           <label>
@@ -363,6 +372,16 @@ export default function Admin() {
               placeholder='새 비밀번호 확인'
             />
           </label>
+          <label>
+            이메일 (ID/PW 찾기용)
+            <input
+              type='email'
+              className='input'
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder='이메일'
+            />
+          </label>
           {message && <p className='admin-message'>{message}</p>}
           <button type='submit' className='btn btn-primary'>
             변경 저장
@@ -383,13 +402,22 @@ export default function Admin() {
           </div>
         </div>
         <p className='panel-hint'>
-          Verdent Auth로 가입한 사용자를 관리합니다. 새 사용자는 기본적으로 비활성화 상태이며
-          관리자가 승인(활성화)해야 로그인할 수 있습니다.
+          회원가입한 사용자는 기본적으로 비활성화 상태입니다. 관리자가 승인(활성화)해야
+          로그인할 수 있습니다.
         </p>
 
         {isAddOpen && (
           <form onSubmit={handleAddUser} className='admin-form add-user-form'>
             <div className='form-grid'>
+              <label>
+                아이디
+                <input
+                  className='input'
+                  value={addForm.id}
+                  onChange={(e) => setAddForm({ ...addForm, id: e.target.value })}
+                  placeholder='아이디'
+                />
+              </label>
               <label>
                 이메일
                 <input
@@ -458,6 +486,7 @@ export default function Admin() {
             {users.map((user) => (
               <div key={user.id} className={`user-row ${user.active ? 'active' : 'inactive'}`}>
                 <div className='user-info'>
+                  <span className='user-id'>{user.id}</span>
                   <span className='user-email'>{user.email}</span>
                   <span className={`tag ${user.role === 'admin' ? 'highlight' : ''}`}>
                     {user.role === 'admin' ? '관리자' : '사용자'}
@@ -480,7 +509,7 @@ export default function Admin() {
                       관리자 임명
                     </button>
                   )}
-                  {user.role === 'admin' && user.id !== currentUser.id && (
+                  {user.role === 'admin' && user.id !== 'admin' && (
                     <button className='btn' onClick={() => demote(user)}>
                       사용자로 변경
                     </button>

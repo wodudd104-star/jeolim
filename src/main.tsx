@@ -3,16 +3,7 @@ import { createRoot } from 'react-dom/client';
 import * as XLSX from 'xlsx';
 import './style.css';
 import { sendSms } from './lib/api';
-import { supabase } from './lib/supabase';
-import {
-  fetchOrders,
-  fetchProducts,
-  insertOrder,
-  updateOrder,
-  deleteOrder,
-  upsertProduct,
-  deleteProduct,
-} from './lib/data';
+import { load, save } from './lib/storage';
 import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page } from './types';
 import Login, { isAdmin, isLoggedIn, logout } from './components/Login';
 import Customers from './components/Customers';
@@ -21,6 +12,8 @@ import Dashboard from './components/Dashboard';
 
 const STATUS_LIST: OrderStatus[] = ['접수', '준비중', '완료', '취소'];
 const PICKUP_LIST: PickupType[] = ['매장방문', '배송'];
+const ORDERS_KEY = 'jeolim-cabbage-orders-v3';
+const PRODUCTS_KEY = 'jeolim-cabbage-products-v1';
 
 declare global {
   interface Window {
@@ -102,42 +95,12 @@ export default function App() {
   const postcodeWrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    let cancelled = false;
-    async function loadData() {
-      if (!isLoggedIn()) return;
-      try {
-        const [loadedOrders, loadedProducts] = await Promise.all([
-          fetchOrders(),
-          fetchProducts(),
-        ]);
-        if (cancelled) return;
-        setOrders(loadedOrders);
-        if (loadedProducts.length > 0) {
-          setProducts(loadedProducts);
-        } else {
-          for (const p of defaultProducts) {
-            await upsertProduct(p);
-          }
-          setProducts(defaultProducts);
-        }
-      } catch (err) {
-        console.error('Failed to load data:', err);
-      }
-    }
-    loadData();
-    return () => {
-      cancelled = true;
-    };
+    setOrders(load(ORDERS_KEY, []));
+    setProducts(load(PRODUCTS_KEY, defaultProducts));
   }, []);
 
-  useEffect(() => {
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setLoggedIn(!!session?.user);
-    });
-    return () => {
-      listener.subscription.unsubscribe();
-    };
-  }, []);
+  useEffect(() => save(ORDERS_KEY, orders), [orders]);
+  useEffect(() => save(PRODUCTS_KEY, products), [products]);
 
   const filtered = useMemo(() => {
     const term = search.trim();
@@ -203,7 +166,7 @@ export default function App() {
     setIsFormOpen(true);
   }
 
-  async function handleSubmit(e: React.FormEvent) {
+  function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!form.name.trim()) {
       alert('고객명을 입력해주세요.');
@@ -218,88 +181,59 @@ export default function App() {
       totalPrice: calcTotal(form.quantity, form.pricePerUnit),
     };
     if (editingId) {
-      try {
-        await updateOrder(editingId, payload);
-        setOrders((prev) =>
-          prev.map((o) => (o.id === editingId ? { ...payload, id: editingId, createdAt: o.createdAt } : o))
-        );
-      } catch (err: any) {
-        alert(err.message || '주문 수정에 실패했습니다.');
-        return;
-      }
+      setOrders((prev) =>
+        prev.map((o) => (o.id === editingId ? { ...payload, id: editingId, createdAt: o.createdAt } : o))
+      );
     } else {
-      try {
-        const newOrder = await insertOrder(payload);
-        setOrders((prev) => [newOrder, ...prev]);
-      } catch (err: any) {
-        alert(err.message || '주문 등록에 실패했습니다.');
-        return;
-      }
+      const newOrder: Order = {
+        ...payload,
+        id: crypto.randomUUID(),
+        createdAt: new Date().toISOString(),
+      };
+      setOrders((prev) => [newOrder, ...prev]);
     }
     resetForm();
     setIsFormOpen(false);
   }
 
-  async function updateStatus(id: string, status: OrderStatus) {
-    const patch: Partial<Order> = { status };
-    const order = orders.find((o) => o.id === id);
-    if (status === '준비중' && order && !order.preparationDate) {
-      patch.preparationDate = new Date().toISOString().slice(0, 10);
-    }
-    try {
-      await updateOrder(id, patch);
-      setOrders((prev) =>
-        prev.map((o) => (o.id === id ? { ...o, ...patch } : o))
-      );
-    } catch (err: any) {
-      alert(err.message || '상태 변경에 실패했습니다.');
-    }
+  function updateStatus(id: string, status: OrderStatus) {
+    setOrders((prev) =>
+      prev.map((o) => {
+        if (o.id !== id) return o;
+        const patch: Partial<Order> = { status };
+        if (status === '준비중' && !o.preparationDate) {
+          patch.preparationDate = new Date().toISOString().slice(0, 10);
+        }
+        return { ...o, ...patch };
+      })
+    );
   }
 
-  async function updatePreparationDate(id: string, date: string) {
-    try {
-      await updateOrder(id, { preparationDate: date });
-      setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, preparationDate: date } : o)));
-    } catch (err: any) {
-      alert(err.message || '준비일 변경에 실패했습니다.');
-    }
+  function updatePreparationDate(id: string, date: string) {
+    setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, preparationDate: date } : o)));
   }
 
-  async function toggleDeposit(id: string) {
-    const order = orders.find((o) => o.id === id);
-    if (!order) return;
-    const nextDeposit = !order.deposit;
-    const patch: Partial<Order> = {
-      deposit: nextDeposit,
-      depositAmount: nextDeposit ? order.totalPrice : 0,
-    };
-    try {
-      await updateOrder(id, patch);
-      setOrders((prev) =>
-        prev.map((o) => (o.id === id ? { ...o, ...patch } : o))
-      );
-    } catch (err: any) {
-      alert(err.message || '입금 상태 변경에 실패했습니다.');
-    }
+  function toggleDeposit(id: string) {
+    setOrders((prev) =>
+      prev.map((o) => {
+        if (o.id !== id) return o;
+        const nextDeposit = !o.deposit;
+        return {
+          ...o,
+          deposit: nextDeposit,
+          depositAmount: nextDeposit ? o.totalPrice : 0,
+        };
+      })
+    );
   }
 
-  async function updateDepositAmount(id: string, amount: number) {
-    const patch: Partial<Order> = { depositAmount: amount, deposit: amount >= (orders.find((o) => o.id === id)?.totalPrice || 0) };
-    try {
-      await updateOrder(id, patch);
-      setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, ...patch } : o)));
-    } catch (err: any) {
-      alert(err.message || '입금액 변경에 실패했습니다.');
-    }
+  function updateDepositAmount(id: string, amount: number) {
+    setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, depositAmount: amount, deposit: amount >= o.totalPrice } : o)));
   }
 
-  async function removeOrder(id: string) {
-    if (!confirm('이 주문을 삭제할까요?')) return;
-    try {
-      await deleteOrder(id);
+  function removeOrder(id: string) {
+    if (confirm('이 주문을 삭제할까요?')) {
       setOrders((prev) => prev.filter((o) => o.id !== id));
-    } catch (err: any) {
-      alert(err.message || '주문 삭제에 실패했습니다.');
     }
   }
 
@@ -756,17 +690,7 @@ export default function App() {
             {isSettingsOpen && isAdmin() && (
               <ProductSettingsModal
                 products={products}
-                onSave={async (next) => {
-                  try {
-                    const currentIds = new Set(next.map((p) => p.id));
-                    const removed = products.filter((p) => !currentIds.has(p.id));
-                    await Promise.all(removed.map((p) => deleteProduct(p.id)));
-                    await Promise.all(next.map((p) => upsertProduct(p)));
-                    setProducts(next);
-                  } catch (err: any) {
-                    alert(err.message || '품목 저장에 실패했습니다.');
-                  }
-                }}
+                onChange={setProducts}
                 onClose={() => setIsSettingsOpen(false)}
               />
             )}
@@ -1097,15 +1021,14 @@ function PublicOrderView({ order }: { order: Order | undefined }) {
 
 function ProductSettingsModal({
   products,
-  onSave,
+  onChange,
   onClose,
 }: {
   products: Product[];
-  onSave: (p: Product[]) => Promise<void>;
+  onChange: (p: Product[]) => void;
   onClose: () => void;
 }) {
   const [items, setItems] = useState<Product[]>(products);
-  const [saving, setSaving] = useState(false);
 
   function addItem() {
     setItems((prev) => [...prev, { id: crypto.randomUUID(), name: '', unit: '포기', price: 0 }]);
@@ -1119,15 +1042,10 @@ function ProductSettingsModal({
     setItems((prev) => prev.filter((p) => p.id !== id));
   }
 
-  async function save() {
+  function save() {
     const valid = items.filter((p) => p.name.trim());
-    setSaving(true);
-    try {
-      await onSave(valid);
-      onClose();
-    } finally {
-      setSaving(false);
-    }
+    onChange(valid);
+    onClose();
   }
 
   return (
@@ -1176,11 +1094,11 @@ function ProductSettingsModal({
             + 품목 추가
           </button>
           <div className='spacer' />
-          <button className='btn' onClick={onClose} disabled={saving}>
+          <button className='btn' onClick={onClose}>
             취소
           </button>
-          <button className='btn btn-primary' onClick={save} disabled={saving}>
-            {saving ? '저장 중...' : '저장'}
+          <button className='btn btn-primary' onClick={save}>
+            저장
           </button>
         </div>
       </div>
