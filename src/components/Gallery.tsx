@@ -163,8 +163,8 @@ export default function Gallery() {
       } catch {
         // 클립보드 실패 시 URL 표시만
       }
-    } catch {
-      alert('URL 생성에 실패했습니다. 잠시 후 다시 시도해주세요.');
+    } catch (err: any) {
+      alert(err?.message || 'URL 생성에 실패했습니다. 잠시 후 다시 시도해주세요.');
     } finally {
       setGenerating(false);
     }

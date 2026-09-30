@@ -28,6 +28,13 @@ export async function syncAppData(key: string, value: unknown) {
   return res.json();
 }
 
+async function throwIfFailed(res: Response, fallback: string) {
+  if (res.ok) return;
+  const data = await res.json().catch(() => ({} as { error?: string }));
+  if (res.status === 401) throw new Error('로그인이 만료되었습니다. 로그아웃 후 다시 로그인해주세요.');
+  throw new Error(data.error || `${fallback} (HTTP ${res.status})`);
+}
+
 export async function syncPublicOrder(order: unknown) {
   const res = await fetch(getUrl(`/api/public/order/${encodeURIComponent((order as any).id)}`), {
     method: 'PUT',
@@ -35,7 +42,7 @@ export async function syncPublicOrder(order: unknown) {
     body: JSON.stringify(order),
     credentials: 'include',
   });
-  if (!res.ok) throw new Error('주문 공유 동기화 실패');
+  await throwIfFailed(res, '주문 공유 동기화 실패');
   return res.json();
 }
 
@@ -54,7 +61,7 @@ export async function syncPublicGallery(items: unknown[], notice: string) {
     body: JSON.stringify({ items, notice }),
     credentials: 'include',
   });
-  if (!res.ok) throw new Error('갤러리 공유 동기화 실패');
+  await throwIfFailed(res, '갤러리 공유 동기화 실패');
   return res.json();
 }
 

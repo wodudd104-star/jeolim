@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import cookieParser from 'cookie-parser';
@@ -82,12 +83,41 @@ const SIGNUP_LOG_FILE = path.join(__dirname, 'data', 'signups.json');
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24시간
 
+const SESSIONS_FILE = path.join(__dirname, 'data', 'sessions.json');
 const sessions = new Map();
+
+function loadSessions() {
+  try {
+    const raw = JSON.parse(fsSync.readFileSync(SESSIONS_FILE, 'utf-8'));
+    const now = Date.now();
+    for (const [token, session] of Object.entries(raw || {})) {
+      if (session && session.expiresAt > now) {
+        sessions.set(token, session);
+      }
+    }
+  } catch {
+    // 세션 파일 없음/손상 시 새로 시작
+  }
+}
+
+let sessionSaveTimer = null;
+function scheduleSessionSave() {
+  if (sessionSaveTimer) return;
+  sessionSaveTimer = setTimeout(() => {
+    sessionSaveTimer = null;
+    const obj = Object.fromEntries(sessions);
+    fsSync.mkdirSync(path.dirname(SESSIONS_FILE), { recursive: true });
+    fsSync.writeFileSync(SESSIONS_FILE, JSON.stringify(obj));
+  }, 500);
+}
+
+loadSessions();
 
 function createSession(userId, role) {
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = Date.now() + SESSION_TTL_MS;
   sessions.set(token, { userId, role, expiresAt });
+  scheduleSessionSave();
   return { token, expiresAt };
 }
 
@@ -97,6 +127,7 @@ function getSession(token) {
   if (!session) return null;
   if (session.expiresAt < Date.now()) {
     sessions.delete(token);
+    scheduleSessionSave();
     return null;
   }
   return session;
@@ -318,7 +349,10 @@ app.post('/api/login', authLimiter, async (req, res) => {
 
 app.post('/api/logout', requireAuth, (_req, res) => {
   const token = _req.cookies?.session;
-  if (token) sessions.delete(token);
+  if (token) {
+    sessions.delete(token);
+    scheduleSessionSave();
+  }
   clearSessionCookie(res);
   res.json({ success: true });
 });

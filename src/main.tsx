@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client';
 import * as XLSX from 'xlsx';
 import './style.css';
-import { sendSms, syncPublicOrder, fetchPublicOrder, fetchAllAppData, syncAppData } from './lib/api';
+import { sendSms, syncPublicOrder, fetchPublicOrder, fetchAllAppData, syncAppData, me } from './lib/api';
 import { load, save } from './lib/storage';
 import { compressImage } from './lib/images';
 import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page, Customer } from './types';
@@ -221,6 +221,17 @@ export default function App() {
     let alive = true;
     (async () => {
       try {
+        // 서버 세션이 만료된 상태(재배포 등)인지 먼저 확인
+        const sessionUser = await me();
+        if (alive && !sessionUser) {
+          await performLogout();
+          if (alive) {
+            setLoggedIn(false);
+            setBooted(true);
+            alert('로그인 세션이 만료되었습니다. 다시 로그인해주세요.');
+          }
+          return;
+        }
         const all = await fetchAllAppData();
         if (alive && all) {
           for (const [key, lsKey] of Object.entries(SYNC_KEYS)) {
