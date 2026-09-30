@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { Customer, Order } from '../types';
-import { isAdmin } from './Login';
+import { isAdmin, isLoggedIn } from './Login';
 import {
   deleteCustomer,
   fetchCustomers,
@@ -49,6 +49,10 @@ export default function Customers({ orders }: { orders: Order[] }) {
   const admin = isAdmin();
 
   useEffect(() => {
+    if (!isLoggedIn()) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
     fetchCustomers()
       .then((list) => {

@@ -104,6 +104,7 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     async function loadData() {
+      if (!isLoggedIn()) return;
       try {
         const [loadedOrders, loadedProducts] = await Promise.all([
           fetchOrders(),
