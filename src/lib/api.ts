@@ -8,6 +8,26 @@ function getHeaders(): Record<string, string> {
   return { 'Content-Type': 'application/json' };
 }
 
+export async function fetchAllAppData(): Promise<Record<string, unknown> | null> {
+  const res = await fetch(getUrl('/api/data/all'), {
+    credentials: 'include',
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function syncAppData(key: string, value: unknown) {
+  const res = await fetch(getUrl(`/api/data/${encodeURIComponent(key)}`), {
+    method: 'PUT',
+    headers: getHeaders(),
+    body: JSON.stringify(value),
+    credentials: 'include',
+    keepalive: true,
+  });
+  if (!res.ok) throw new Error('데이터 자동저장 실패');
+  return res.json();
+}
+
 export async function syncPublicOrder(order: unknown) {
   const res = await fetch(getUrl(`/api/public/order/${encodeURIComponent((order as any).id)}`), {
     method: 'PUT',

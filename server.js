@@ -649,6 +649,45 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
+// ===== 앱 데이터 자동저장 (배포/재배포 시 데이터 보존) =====
+const APP_DATA_FILE = path.join(__dirname, 'src/lib/data/app-data.json');
+const APP_DATA_KEYS = new Set([
+  'orders',
+  'products',
+  'customers',
+  'accounts',
+  'gallery',
+  'gallery_notice',
+]);
+
+app.get('/api/data/all', requireAuth, async (_req, res) => {
+  try {
+    const store = await readJsonSafe(APP_DATA_FILE, {});
+    const out = {};
+    for (const key of Object.keys(store)) {
+      if (APP_DATA_KEYS.has(key)) out[key] = store[key] ? store[key].value : undefined;
+    }
+    return res.json(out);
+  } catch {
+    return res.status(500).json({ error: '데이터 조회에 실패했습니다.' });
+  }
+});
+
+app.put('/api/data/:key', requireAuth, async (req, res) => {
+  try {
+    const key = req.params.key;
+    if (!APP_DATA_KEYS.has(key)) {
+      return res.status(400).json({ error: '지원하지 않는 데이터 키입니다.' });
+    }
+    const store = await readJsonSafe(APP_DATA_FILE, {});
+    store[key] = { value: req.body, savedAt: new Date().toISOString() };
+    await writeJsonSafe(APP_DATA_FILE, store);
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '데이터 저장에 실패했습니다.' });
+  }
+});
+
 // ===== 공유 주문 / 갤러리 스냅샷 (공개 조회용) =====
 const PUBLIC_ORDERS_FILE = path.join(__dirname, 'src/lib/data/public-orders.json');
 const PUBLIC_GALLERY_FILE = path.join(__dirname, 'src/lib/data/public-gallery.json');

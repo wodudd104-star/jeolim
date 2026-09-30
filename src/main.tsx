@@ -1,8 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as XLSX from 'xlsx';
 import './style.css';
-import { sendSms, syncPublicOrder, fetchPublicOrder } from './lib/api';
+import { sendSms, syncPublicOrder, fetchPublicOrder, fetchAllAppData, syncAppData } from './lib/api';
 import { load, save } from './lib/storage';
 import { compressImage } from './lib/images';
 import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page, Customer } from './types';
@@ -15,8 +15,7 @@ import Gallery, { PublicGallery } from './components/Gallery';
 const STATUS_LIST: OrderStatus[] = ['접수', '준비중', '택배', '현장수령', '완료', '취소'];
 const STATUS_FLOW: Partial<Record<OrderStatus, OrderStatus>> = {
   접수: '준비중',
-  준비중: '택배',
-  택배: '현장수령',
+  택배: '완료',
   현장수령: '완료',
 };
 const PICKUP_LIST: PickupType[] = ['매장방문', '배송'];
@@ -170,6 +169,7 @@ export default function App() {
   const [printOrder, setPrintOrder] = useState<Order | null>(null);
   const [isPostcodeOpen, setIsPostcodeOpen] = useState(false);
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
+  const [photoModalOrderId, setPhotoModalOrderId] = useState<string | null>(null);
   const [accountNumber, setAccountNumber] = useState(() => getStoredAccountNumber());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const postcodeWrapRef = useRef<HTMLDivElement>(null);
@@ -181,6 +181,92 @@ export default function App() {
 
   useEffect(() => save(ORDERS_KEY, orders), [orders]);
   useEffect(() => save(PRODUCTS_KEY, products), [products]);
+
+  // ===== 서버 자동저장/복원 (배포·재배포 시 데이터 보존) =====
+  const SYNC_KEYS: Record<string, string> = {
+    orders: ORDERS_KEY,
+    products: PRODUCTS_KEY,
+    customers: 'jc_customers_v1',
+    accounts: 'jc_accounts',
+    gallery: 'jc_gallery_v1',
+    gallery_notice: 'jc_gallery_notice_v1',
+  };
+
+  const [booted, setBooted] = useState(() => !isLoggedIn());
+
+  // 로그인 상태로 시작하면 서버에 저장된 데이터를 먼저 복원 (로컬이 비어있을 때만)
+  useEffect(() => {
+    if (!loggedIn) {
+      setBooted(true);
+      return;
+    }
+    setBooted(false);
+    let alive = true;
+    (async () => {
+      try {
+        const all = await fetchAllAppData();
+        if (alive && all) {
+          for (const [key, lsKey] of Object.entries(SYNC_KEYS)) {
+            const serverValue = (all as any)[key];
+            if (serverValue === undefined || serverValue === null) continue;
+            const localRaw = localStorage.getItem(lsKey);
+            const localEmpty =
+              !localRaw ||
+              localRaw === '[]' ||
+              localRaw === 'null' ||
+              localRaw === '""' ||
+              localRaw === '{}';
+            if (localEmpty) {
+              save(lsKey, serverValue);
+              if (key === 'orders') setOrders(serverValue);
+              if (key === 'products') setProducts(serverValue);
+            }
+          }
+        }
+      } catch {
+        // 서버 부재 시 로컬 데이터로 진행
+      } finally {
+        if (alive) setBooted(true);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loggedIn]);
+
+  // 주기적으로 로컬 데이터를 서버에 자동 저장 (변경분만)
+  const lastSyncedRef = useRef<Record<string, string>>({});
+  const syncNow = useCallback(async () => {
+    if (!isLoggedIn()) return;
+    for (const [key, lsKey] of Object.entries(SYNC_KEYS)) {
+      let raw: string | null = null;
+      if (key === 'orders') raw = JSON.stringify(orders ?? []);
+      else if (key === 'products') raw = JSON.stringify(products ?? []);
+      else raw = localStorage.getItem(lsKey);
+      if (raw == null) continue;
+      if (lastSyncedRef.current[key] === raw) continue;
+      const prev = lastSyncedRef.current[key];
+      lastSyncedRef.current[key] = raw;
+      try {
+        await syncAppData(key, JSON.parse(raw));
+      } catch {
+        if (prev !== undefined) lastSyncedRef.current[key] = prev;
+      }
+    }
+  }, [orders, products]);
+
+  useEffect(() => {
+    const timer = setInterval(syncNow, 10000);
+    const flush = () => syncNow();
+    window.addEventListener('visibilitychange', flush);
+    window.addEventListener('beforeunload', flush);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('visibilitychange', flush);
+      window.removeEventListener('beforeunload', flush);
+    };
+  }, [syncNow]);
 
   const filtered = useMemo(() => {
     const term = search.trim();
@@ -196,6 +282,11 @@ export default function App() {
       )
       .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
   }, [orders, filter, search]);
+
+  const photoModalOrder = useMemo(
+    () => (photoModalOrderId ? orders.find((o) => o.id === photoModalOrderId) : undefined),
+    [photoModalOrderId, orders]
+  );
 
   const summary = useMemo(() => {
     const activeOrders = orders.filter((o) => o.status !== '취소');
@@ -395,44 +486,6 @@ export default function App() {
 
   const MAX_ORDER_PHOTOS = 5;
 
-  async function handleOrderPhotoSelect(orderId: string, e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files || []);
-    e.target.value = '';
-    if (files.length === 0) return;
-    const order = orders.find((o) => o.id === orderId);
-    if (!order) return;
-    const current = order.photos || [];
-    const remaining = MAX_ORDER_PHOTOS - current.length;
-    if (remaining <= 0) {
-      alert(`사진은 최대 ${MAX_ORDER_PHOTOS}장까지 등록할 수 있습니다.`);
-      return;
-    }
-    const targets = files.slice(0, remaining);
-    if (files.length > remaining) {
-      alert(`최대 ${MAX_ORDER_PHOTOS}장까지 가능하여 ${remaining}장만 추가됩니다.`);
-    }
-    try {
-      const compressed = await Promise.all(targets.map((f) => compressImage(f)));
-      setOrders((prev) =>
-        prev.map((o) =>
-          o.id === orderId ? { ...o, photos: [...(o.photos || []), ...compressed] } : o
-        )
-      );
-    } catch (err: any) {
-      alert(err.message || '이미지를 처리하는 중 오류가 발생했습니다.');
-    }
-  }
-
-  function removeOrderPhoto(orderId: string, index: number) {
-    setOrders((prev) =>
-      prev.map((o) =>
-        o.id === orderId
-          ? { ...o, photos: (o.photos || []).filter((_, i) => i !== index) }
-          : o
-      )
-    );
-  }
-
   function handlePrint(order: Order) {
     setPrintOrder(order);
     setTimeout(() => {
@@ -630,6 +683,20 @@ export default function App() {
 
   if (!loggedIn) {
     return <Login onLogin={() => setLoggedIn(true)} />;
+  }
+
+  // 서버 데이터 복원 중에는 로딩 화면 표시 (자식 컴포넌트가 복원된 데이터로 마운트되도록)
+  if (!booted) {
+    return (
+      <main className='app-shell'>
+        <div className='container'>
+          <div className='panel boot-panel'>
+            <h2>데이터를 불러오는 중...</h2>
+            <p className='empty'>등록하신 내용을 자동으로 저장·복원하고 있습니다.</p>
+          </div>
+        </div>
+      </main>
+    );
   }
 
   return (
@@ -1100,6 +1167,24 @@ export default function App() {
                           <button className='btn icon' onClick={() => copyOrderUrl(order)} title='주문 조회 링크 복사 (실시간 공유)'>
                             🔗
                           </button>
+                          {order.status === '준비중' && (
+                            <>
+                              <button
+                                className='btn status-choice-btn courier'
+                                onClick={() => updateStatus(order.id, '택배')}
+                                title='택배 수령으로 진행'
+                              >
+                                🚚 택배
+                              </button>
+                              <button
+                                className='btn status-choice-btn visit'
+                                onClick={() => updateStatus(order.id, '현장수령')}
+                                title='현장 수령으로 진행'
+                              >
+                                🏪 현장수령
+                              </button>
+                            </>
+                          )}
                           {STATUS_FLOW[order.status] && (
                             <button
                               className='btn status-next-btn'
@@ -1194,35 +1279,12 @@ export default function App() {
                               📷 완료 사진 ({(order.photos || []).length}/{MAX_ORDER_PHOTOS})
                             </span>
                             <div className='order-photos-actions'>
-                              {(order.photos || []).length < MAX_ORDER_PHOTOS && (
-                                <label className='btn small order-photo-add'>
-                                  사진 추가
-                                  <input
-                                    type='file'
-                                    accept='image/*'
-                                    multiple
-                                    style={{ display: 'none' }}
-                                    onChange={(e) => handleOrderPhotoSelect(order.id, e)}
-                                  />
-                                </label>
-                              )}
                               <button
                                 type='button'
-                                className='btn small btn-primary order-photo-save'
-                                onClick={async () => {
-                                  if (!order.shared) {
-                                    alert('사진이 저장되었습니다.');
-                                    return;
-                                  }
-                                  try {
-                                    await syncPublicOrder(order);
-                                    alert('사진이 저장되었습니다.\n공유 링크에서도 즉시 확인할 수 있습니다.');
-                                  } catch {
-                                    alert('사진은 저장되었지만 서버 동기화에 실패했습니다.');
-                                  }
-                                }}
+                                className='btn small btn-primary order-photo-open'
+                                onClick={() => setPhotoModalOrderId(order.id)}
                               >
-                                저장
+                                사진 등록
                               </button>
                             </div>
                           </div>
@@ -1231,14 +1293,6 @@ export default function App() {
                               {(order.photos || []).map((photo, idx) => (
                                 <div key={idx} className='order-photo-item'>
                                   <img src={photo} alt={`완료 사진 ${idx + 1}`} />
-                                  <button
-                                    type='button'
-                                    className='btn icon small danger order-photo-del'
-                                    onClick={() => removeOrderPhoto(order.id, idx)}
-                                    title='삭제'
-                                  >
-                                    ✕
-                                  </button>
                                 </div>
                               ))}
                             </div>
@@ -1267,6 +1321,26 @@ export default function App() {
       <div className='print-only'>
         {printOrder && <Receipt order={printOrder} />}
       </div>
+
+      {photoModalOrder && (
+        <OrderPhotoModal
+          order={photoModalOrder}
+          maxPhotos={MAX_ORDER_PHOTOS}
+          onClose={() => setPhotoModalOrderId(null)}
+          onSave={async (photos) => {
+            updateOrderFields(photoModalOrder.id, { photos });
+            setPhotoModalOrderId(null);
+            if (photoModalOrder.shared) {
+              try {
+                await syncPublicOrder({ ...photoModalOrder, photos });
+              } catch {
+                // 자동 동기화에서 재시도됨
+              }
+            }
+            alert('사진이 저장되었습니다.');
+          }}
+        />
+      )}
     </main>
   );
 }
@@ -1379,6 +1453,149 @@ function Receipt({ order }: { order: Order }) {
         <span>{getPaymentStatus(order)}</span>
       </div>
       <p className='receipt-thanks'>이용해주셔서 감사합니다.</p>
+    </div>
+  );
+}
+
+function OrderPhotoModal({
+  order,
+  maxPhotos,
+  onClose,
+  onSave,
+}: {
+  order: Order;
+  maxPhotos: number;
+  onClose: () => void;
+  onSave: (photos: string[]) => void | Promise<void>;
+}) {
+  const [photos, setPhotos] = useState<string[]>(order.photos || []);
+  const [saving, setSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  async function handleSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    if (inputRef.current) inputRef.current.value = '';
+    if (files.length === 0) return;
+    const remaining = maxPhotos - photos.length;
+    if (remaining <= 0) {
+      alert(`사진은 최대 ${maxPhotos}장까지 등록할 수 있습니다.`);
+      return;
+    }
+    const targets = files.slice(0, remaining);
+    if (files.length > remaining) {
+      alert(`최대 ${maxPhotos}장까지 가능하여 ${remaining}장만 추가됩니다.`);
+    }
+    try {
+      const compressed = await Promise.all(targets.map((f) => compressImage(f)));
+      setPhotos((prev) => [...prev, ...compressed]);
+    } catch (err: any) {
+      alert(err.message || '이미지를 처리하는 중 오류가 발생했습니다.');
+    }
+  }
+
+  function removePhoto(index: number) {
+    setPhotos((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function movePhoto(index: number, direction: -1 | 1) {
+    setPhotos((prev) => {
+      const target = index + direction;
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }
+
+  return (
+    <div className='modal-overlay' onClick={onClose}>
+      <div className='modal photo-modal' onClick={(e) => e.stopPropagation()}>
+        <header className='modal-header'>
+          <h3>📷 완료 사진 등록</h3>
+          <button className='btn icon' onClick={onClose} title='닫기'>
+            ✕
+          </button>
+        </header>
+        <p className='photo-modal-sub'>
+          {order.name} · {order.cabbageType} {order.quantity}
+          {order.unit} (최대 {maxPhotos}장)
+        </p>
+        <div className='photo-grid modal-grid'>
+          {photos.map((photo, idx) => (
+            <div key={idx} className='photo-item'>
+              <img src={photo} alt={`완료 사진 ${idx + 1}`} />
+              <div className='photo-item-actions'>
+                <button
+                  type='button'
+                  className='btn icon small'
+                  onClick={() => movePhoto(idx, -1)}
+                  disabled={idx === 0}
+                  title='앞으로'
+                >
+                  ◀
+                </button>
+                <button
+                  type='button'
+                  className='btn icon small'
+                  onClick={() => movePhoto(idx, 1)}
+                  disabled={idx === photos.length - 1}
+                  title='뒤로'
+                >
+                  ▶
+                </button>
+                <button
+                  type='button'
+                  className='btn icon small danger'
+                  onClick={() => removePhoto(idx)}
+                  title='삭제'
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          ))}
+          {photos.length < maxPhotos && (
+            <button
+              type='button'
+              className='photo-add'
+              onClick={() => inputRef.current?.click()}
+            >
+              📷 사진 추가
+              <span className='photo-add-count'>
+                {photos.length}/{maxPhotos}
+              </span>
+            </button>
+          )}
+        </div>
+        <input
+          ref={inputRef}
+          type='file'
+          accept='image/*'
+          multiple
+          style={{ display: 'none' }}
+          onChange={handleSelect}
+        />
+        <footer className='modal-foot'>
+          <button type='button' className='btn' onClick={onClose}>
+            취소
+          </button>
+          <button
+            type='button'
+            className='btn btn-primary'
+            disabled={saving}
+            onClick={async () => {
+              setSaving(true);
+              try {
+                await onSave(photos);
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            {saving ? '저장 중...' : '저장'}
+          </button>
+        </footer>
+      </div>
     </div>
   );
 }
@@ -1510,8 +1727,14 @@ function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?
   }
 
   const balance = order.totalPrice - order.depositAmount;
-  const steps: OrderStatus[] = ['접수', '준비중', '택배', '현장수령', '완료'];
-  const stepIndex = steps.indexOf(order.status === '취소' ? '접수' : (order.status as OrderStatus));
+  // 접수 → 준비중 → 수령(택배/현장수령 중 선택) → 완료
+  const stepIndexMap: Record<string, number> = { 접수: 0, 준비중: 1, 택배: 2, 현장수령: 2, 완료: 3 };
+  const stepIndex =
+    order.status === '취소' ? 0 : (stepIndexMap[order.status] ?? 0);
+  const steps =
+    order.status === '택배' || order.status === '현장수령'
+      ? ['접수', '준비중', order.status, '완료']
+      : ['접수', '준비중', '수령', '완료'];
 
   return (
     <div className='app-shell'>
