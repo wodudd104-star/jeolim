@@ -801,6 +801,19 @@ app.get('/api/public/order/:id', async (req, res) => {
   }
 });
 
+app.delete('/api/public/order/:id', requireAuth, async (req, res) => {
+  try {
+    const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
+    if (store.orders && store.orders[req.params.id]) {
+      delete store.orders[req.params.id];
+      await storeWrite('public_orders', PUBLIC_ORDERS_FILE, store);
+    }
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '공유 링크 삭제에 실패했습니다.' });
+  }
+});
+
 app.put('/api/public/gallery', requireAuth, async (req, res) => {
   try {
     const { items, notice } = req.body || {};

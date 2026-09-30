@@ -74,7 +74,7 @@ function formatDate(date: string | undefined) {
 }
 
 function formatCurrency(value: number) {
-  return value.toLocaleString('ko-KR') + '원';
+  return (Number(value) || 0).toLocaleString('ko-KR') + '원';
 }
 
 function formatPhone(value: string) {
