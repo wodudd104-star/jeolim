@@ -242,6 +242,39 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/bootstrap-admin', async (req, res) => {
+  if (!supabaseAdmin) {
+    return res.status(500).json({ error: '서버 인증 설정이 되어있지 않습니다.' });
+  }
+  const { email, password, secret } = req.body;
+  const expectedSecret = process.env.ADMIN_BOOTSTRAP_SECRET;
+  if (!expectedSecret || secret !== expectedSecret) {
+    return res.status(403).json({ error: '관리자 생성 비밀키가 올바르지 않습니다.' });
+  }
+  if (!email || !password || password.length < 6) {
+    return res.status(400).json({ error: '이메일과 6자 이상의 비밀번호를 입력해주세요.' });
+  }
+
+  const { data: existing } = await supabaseAdmin.auth.admin.listUsers();
+  const hasAdmin = (existing.users || []).some(
+    (u) => u.user_metadata?.role === 'admin'
+  );
+  if (hasAdmin) {
+    return res.status(409).json({ error: '관리자 계정이 이미 존재합니다.' });
+  }
+
+  const { data, error } = await supabaseAdmin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+    user_metadata: { role: 'admin', active: true },
+  });
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+  res.json({ success: true, id: data.user.id });
+});
+
 app.use(express.static(path.join(__dirname, 'dist')));
 
 app.get('*', (_req, res) => {
