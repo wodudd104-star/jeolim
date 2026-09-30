@@ -726,19 +726,27 @@ async function writeJsonSafe(file, data) {
   await fs.writeFile(file, JSON.stringify(data, null, 2));
 }
 
-// DB(Supabase)가 연결되면 app_kv 테이블에 영구 저장, 아니면 로컬 JSON 폭백
+// DB(Supabase)가 연결되면 app_kv 테이블에 영구 저장, 오류/미연결 시 로컬 JSON 폭백
 async function storeRead(kvKey, file, fallback) {
   if (hasKv()) {
-    const value = await kvGet(kvKey);
-    return value === null || value === undefined ? fallback : value;
+    try {
+      const value = await kvGet(kvKey);
+      return value === null || value === undefined ? fallback : value;
+    } catch (err) {
+      console.error(`[STORE] ${kvKey} 읽기 실패, JSON 폭백:`, err.message);
+    }
   }
   return readJsonSafe(file, fallback);
 }
 
 async function storeWrite(kvKey, file, data) {
   if (hasKv()) {
-    await kvSet(kvKey, data);
-    return;
+    try {
+      await kvSet(kvKey, data);
+      return;
+    } catch (err) {
+      console.error(`[STORE] ${kvKey} 저장 실패, JSON 폭백:`, err.message);
+    }
   }
   await writeJsonSafe(file, data);
 }
