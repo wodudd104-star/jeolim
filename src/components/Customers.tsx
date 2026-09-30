@@ -10,7 +10,7 @@ declare global {
   }
 }
 
-const CUSTOMERS_KEY = 'jeolim-cabbage-customers-v1';
+const CUSTOMERS_KEY = 'jc_customers_v1';
 
 export function loadCustomers(): Customer[] {
   return load(CUSTOMERS_KEY, []);
