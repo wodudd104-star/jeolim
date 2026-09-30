@@ -11,11 +11,11 @@ import {
   updateServerAuth,
 } from '../lib/api';
 
-const AUTH_USER_KEY = 'jeolim-auth-user-v1';
-const ORDERS_KEY = 'jeolim-cabbage-orders-v3';
-const CUSTOMERS_KEY = 'jeolim-cabbage-customers-v1';
-const PRODUCTS_KEY = 'jeolim-cabbage-products-v1';
-const ACCOUNT_NUMBERS_KEY = 'jeolim-cabbage-account-numbers';
+const AUTH_USER_KEY = 'jc_auth_user_v1';
+const ORDERS_KEY = 'jc_orders_v3';
+const CUSTOMERS_KEY = 'jc_customers_v1';
+const PRODUCTS_KEY = 'jc_products_v1';
+const ACCOUNT_NUMBERS_KEY = 'jc_accounts';
 
 export type AdminAuth = {
   id: string;

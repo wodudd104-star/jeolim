@@ -8,9 +8,9 @@ import {
   sendResetCode,
 } from '../lib/api';
 
-const AUTH_SESSION_KEY = 'jeolim-auth-session';
-const AUTH_ROLE_KEY = 'jeolim-auth-role';
-const AUTH_USER_KEY = 'jeolim-auth-user-v1';
+const AUTH_SESSION_KEY = 'jc_auth_session';
+const AUTH_ROLE_KEY = 'jc_auth_role';
+const AUTH_USER_KEY = 'jc_auth_user_v1';
 
 export type AuthUser = {
   id: string;

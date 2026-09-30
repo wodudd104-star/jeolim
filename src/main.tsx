@@ -12,8 +12,8 @@ import Dashboard from './components/Dashboard';
 
 const STATUS_LIST: OrderStatus[] = ['접수', '준비중', '완료', '취소'];
 const PICKUP_LIST: PickupType[] = ['매장방문', '배송'];
-const ORDERS_KEY = 'jeolim-cabbage-orders-v3';
-const PRODUCTS_KEY = 'jeolim-cabbage-products-v1';
+const ORDERS_KEY = 'jc_orders_v3';
+const PRODUCTS_KEY = 'jc_products_v1';
 
 declare global {
   interface Window {
