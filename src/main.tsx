@@ -2,12 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client';
 import * as XLSX from 'xlsx';
 import './style.css';
-import { sendSms, syncPublicOrder, fetchPublicOrder, fetchAllAppData, syncAppData, me } from './lib/api';
+import { sendSms, syncPublicOrder, fetchPublicOrder, fetchAllAppData, syncAppData, me, submitPublicCustomer, fetchCustomerIntake, ackCustomerIntake } from './lib/api';
 import { load, save } from './lib/storage';
 import { compressImage } from './lib/images';
 import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page, Customer } from './types';
 import Login, { isAdmin, isLoggedIn, performLogout } from './components/Login';
-import Customers, { loadCustomers, updateCustomer } from './components/Customers';
+import Customers, { loadCustomers, saveCustomers, updateCustomer } from './components/Customers';
 import Admin, { AccountManager, getStoredAccountNumber } from './components/Admin';
 import Dashboard from './components/Dashboard';
 import Gallery, { PublicGallery } from './components/Gallery';
@@ -53,6 +53,24 @@ function normalizeOrders(stored: StoredOrder[]): Order[] {
 
 function loadOrders(): Order[] {
   return normalizeOrders(load<StoredOrder[]>(ORDERS_KEY, []));
+}
+
+// URL 자가등록(공개 폼)으로 접수된 고객을 고객관리 목록에 병합
+async function mergeCustomerIntake() {
+  try {
+    const entries = await fetchCustomerIntake();
+    if (!Array.isArray(entries) || entries.length === 0) return;
+    const existing = loadCustomers();
+    const existingIds = new Set(existing.map((c) => c.id));
+    const fresh = (entries as Customer[]).filter((e) => e && e.id && !existingIds.has(e.id));
+    if (fresh.length > 0) {
+      saveCustomers([...existing, ...fresh]);
+      window.dispatchEvent(new Event('jc-customers-updated'));
+    }
+    await ackCustomerIntake((entries as Customer[]).map((e) => e.id));
+  } catch {
+    // 서버 부재 시 무시
+  }
 }
 
 declare global {
@@ -258,6 +276,8 @@ export default function App() {
       } finally {
         if (alive) setBooted(true);
       }
+      // URL 자가등록으로 접수된 고객을 고객관리에 병합
+      await mergeCustomerIntake();
     })();
     return () => {
       alive = false;
@@ -284,6 +304,8 @@ export default function App() {
         if (prev !== undefined) lastSyncedRef.current[key] = prev;
       }
     }
+    // 사용 중에도 새로 접수된 고객을 주기적으로 병합
+    await mergeCustomerIntake();
   }, [orders, products]);
 
   useEffect(() => {
@@ -709,6 +731,10 @@ export default function App() {
 
   if (publicGallery) {
     return <PublicGallery />;
+  }
+
+  if (params.get('register') === 'customer') {
+    return <CustomerIntakeView />;
   }
 
   if (!loggedIn) {
@@ -1712,6 +1738,222 @@ function StatusDetailEditor({
         >
           저장
         </button>
+      </div>
+    </div>
+  );
+}
+
+// 공개 고객 자가등록 폼 (?register=customer) - 로그인 없이 접근 가능
+function CustomerIntakeView() {
+  const [form, setForm] = useState({
+    name: '',
+    phone: '',
+    address: '',
+    memo: '',
+    arrivalDate: '',
+    quantity: '',
+  });
+  const [receiveMethod, setReceiveMethod] = useState<'방문' | '배송' | '택배'>('방문');
+  const [submitting, setSubmitting] = useState(false);
+  const [done, setDone] = useState(false);
+  const [isPostcodeOpen, setIsPostcodeOpen] = useState(false);
+  const postcodeWrapRef = useRef<HTMLDivElement>(null);
+
+  function loadPostcodeScript(): Promise<any> {
+    return new Promise((resolve, reject) => {
+      if (window.daum && window.daum.Postcode) {
+        resolve(window.daum);
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = '//t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js';
+      script.async = true;
+      script.onload = () => resolve(window.daum);
+      script.onerror = () => reject(new Error('주소 검색 스크립트를 불러오지 못했습니다.'));
+      document.head.appendChild(script);
+    });
+  }
+
+  async function openPostcode() {
+    try {
+      const daum = await loadPostcodeScript();
+      setIsPostcodeOpen(true);
+      setTimeout(() => {
+        if (!postcodeWrapRef.current) return;
+        new daum.Postcode({
+          width: '100%',
+          height: '100%',
+          oncomplete: (data: any) => {
+            setForm((prev) => ({ ...prev, address: data.address }));
+            setIsPostcodeOpen(false);
+          },
+        }).embed(postcodeWrapRef.current);
+      }, 0);
+    } catch {
+      alert('주소 검색을 불러오는 중 오류가 발생했습니다.');
+    }
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!form.phone.trim()) {
+      alert('연락처를 입력해주세요.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await submitPublicCustomer({
+        name: form.name.trim(),
+        phone: form.phone.trim(),
+        address: form.address.trim(),
+        memo: form.memo.trim(),
+        arrivalDate: form.arrivalDate || undefined,
+        quantity: form.quantity ? Number(form.quantity) : undefined,
+        receiveMethod,
+      });
+      setDone(true);
+    } catch (err: any) {
+      alert(err?.message || '접수에 실패했습니다. 잠시 후 다시 시도해주세요.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (done) {
+    return (
+      <div className='app-shell'>
+        <div className='container'>
+          <div className='panel public-order'>
+            <h2>접수 완료</h2>
+            <p className='empty'>
+              정보가 정상적으로 접수되었습니다.
+              <br />
+              감사합니다.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className='app-shell'>
+      <div className='container'>
+        <section className='panel form-panel'>
+          <h2>고객 정보 등록</h2>
+          <p className='panel-hint'>
+            아래 양식을 입력하고 [완료] 버튼을 눌러주세요. 연락처는 필수이며 나머지는 선택사항입니다.
+          </p>
+          <form onSubmit={handleSubmit}>
+            <div className='form-grid'>
+              <label>
+                고객명 (선택)
+                <input
+                  className='input'
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  placeholder='미입력 가능'
+                />
+              </label>
+              <label>
+                연락처
+                <input
+                  className='input'
+                  type='tel'
+                  value={form.phone}
+                  onChange={(e) => setForm({ ...form, phone: formatPhone(e.target.value) })}
+                  placeholder='010-0000-0000'
+                  maxLength={13}
+                />
+              </label>
+              <label>
+                도착 예정일 (선택)
+                <input
+                  className='input'
+                  type='date'
+                  value={form.arrivalDate}
+                  onChange={(e) => setForm({ ...form, arrivalDate: e.target.value })}
+                />
+              </label>
+              <label>
+                수량 (선택)
+                <input
+                  className='input'
+                  type='number'
+                  min={0}
+                  value={form.quantity}
+                  onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+                  placeholder='주문 수량'
+                />
+              </label>
+              <label className='full'>
+                수령 방법
+                <div className='address-row'>
+                  {(['방문', '배송', '택배'] as const).map((m) => (
+                    <button
+                      key={m}
+                      type='button'
+                      className={`btn status-choice-btn ${m === '택배' ? 'courier' : 'visit'}`}
+                      style={
+                        receiveMethod === m
+                          ? { outline: '2px solid #166534', outlineOffset: '1px' }
+                          : { opacity: 0.55 }
+                      }
+                      onClick={() => setReceiveMethod(m)}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              </label>
+              <label className='full'>
+                주소
+                <div className='address-row'>
+                  <input
+                    className='input'
+                    value={form.address}
+                    onChange={(e) => setForm({ ...form, address: e.target.value })}
+                    placeholder='배송 주소'
+                  />
+                  <button type='button' className='btn' onClick={openPostcode}>
+                    🔍 주소 검색
+                  </button>
+                </div>
+              </label>
+              <label className='full'>
+                메모
+                <input
+                  className='input'
+                  value={form.memo}
+                  onChange={(e) => setForm({ ...form, memo: e.target.value })}
+                  placeholder='특이사항'
+                />
+              </label>
+            </div>
+            <div className='form-actions'>
+              <button type='submit' className='btn btn-primary' disabled={submitting}>
+                {submitting ? '접수 중...' : '완료'}
+              </button>
+            </div>
+          </form>
+        </section>
+
+        {isPostcodeOpen && (
+          <div
+            className='modal-overlay postcode-overlay'
+            onClick={(e) => e.target === e.currentTarget && setIsPostcodeOpen(false)}
+          >
+            <div className='modal panel postcode-modal'>
+              <div className='modal-header'>
+                <h2>주소 검색</h2>
+                <button className='btn icon' onClick={() => setIsPostcodeOpen(false)}>
+                  ✕
+                </button>
+              </div>
+              <div ref={postcodeWrapRef} className='postcode-wrap'></div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

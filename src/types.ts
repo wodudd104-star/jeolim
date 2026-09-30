@@ -45,6 +45,7 @@ export type Customer = {
   memo: string;
   arrivalDate?: string;
   quantity?: number;
+  receiveMethod?: '방문' | '배송' | '택배';
 };
 
 export type GalleryItem = {

@@ -73,6 +73,43 @@ export async function fetchPublicGallery() {
   return res.json();
 }
 
+export async function submitPublicCustomer(payload: {
+  name?: string;
+  phone: string;
+  address?: string;
+  memo?: string;
+  arrivalDate?: string;
+  quantity?: number;
+  receiveMethod?: string;
+}) {
+  const res = await fetch(getUrl('/api/public/customer'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({} as { error?: string }));
+  if (!res.ok) throw new Error(data.error || '접수에 실패했습니다.');
+  return data;
+}
+
+export async function fetchCustomerIntake() {
+  const res = await fetch(getUrl('/api/customer-intake'), {
+    credentials: 'include',
+  });
+  if (!res.ok) return [];
+  return res.json();
+}
+
+export async function ackCustomerIntake(ids: string[]) {
+  if (ids.length === 0) return;
+  await fetch(getUrl('/api/customer-intake/ack'), {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ ids }),
+    credentials: 'include',
+  }).catch(() => {});
+}
+
 export async function sendSms(recipients: string[], message: string) {
   const res = await fetch(getUrl('/api/send-sms'), {
     method: 'POST',

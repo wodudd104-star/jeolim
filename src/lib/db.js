@@ -348,13 +348,21 @@ export async function resetFailedLogins(id) {
 }
 
 // ===== 범용 키-값 저장소 (재배포 시에도 유지되는 영구 저장) =====
-export function hasDb() {
-  return !!initDb();
+// 우선순위: DATABASE_URL(pg) > Supabase Edge Function 브리지 > 로컬 JSON
+function kvBridge() {
+  const url = process.env.SUPABASE_URL;
+  const token = process.env.KV_BRIDGE_TOKEN;
+  if (!url || !token) return null;
+  return { url: url.replace(/\/$/, '') + '/functions/v1/kv-store', token };
+}
+
+export function hasKv() {
+  return !!initDb() || !!kvBridge();
 }
 
 export async function ensureKvTable() {
   const db = initDb();
-  if (!db) return;
+  if (!db) return; // 브리지 모드는 마이그레이션으로 app_kv가 이미 생성됨
   await db.query(`
     CREATE TABLE IF NOT EXISTS app_kv (
       key TEXT PRIMARY KEY,
@@ -366,17 +374,38 @@ export async function ensureKvTable() {
 
 export async function kvGet(key) {
   const db = initDb();
-  if (!db) return null;
-  const result = await db.query('SELECT value FROM app_kv WHERE key = $1', [key]);
-  return result.rows[0] ? result.rows[0].value : null;
+  if (db) {
+    const result = await db.query('SELECT value FROM app_kv WHERE key = $1', [key]);
+    return result.rows[0] ? result.rows[0].value : null;
+  }
+  const bridge = kvBridge();
+  if (!bridge) return null;
+  const res = await fetch(bridge.url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-kv-token': bridge.token },
+    body: JSON.stringify({ op: 'get', key }),
+  });
+  if (!res.ok) throw new Error(`kv 조회 실패 (HTTP ${res.status})`);
+  const data = await res.json();
+  return data.value === undefined ? null : data.value;
 }
 
 export async function kvSet(key, value) {
   const db = initDb();
-  if (!db) return;
-  await db.query(
-    `INSERT INTO app_kv (key, value, updated_at) VALUES ($1, $2, NOW())
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
-    [key, JSON.stringify(value)]
-  );
+  if (db) {
+    await db.query(
+      `INSERT INTO app_kv (key, value, updated_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [key, JSON.stringify(value)]
+    );
+    return;
+  }
+  const bridge = kvBridge();
+  if (!bridge) return;
+  const res = await fetch(bridge.url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-kv-token': bridge.token },
+    body: JSON.stringify({ op: 'set', key, value }),
+  });
+  if (!res.ok) throw new Error(`kv 저장 실패 (HTTP ${res.status})`);
 }

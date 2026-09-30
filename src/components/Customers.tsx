@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { Customer, Order } from '../types';
 import { load, save } from '../lib/storage';
@@ -78,6 +78,23 @@ export default function Customers({ orders }: { orders: Order[] }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const admin = isAdmin();
+
+  // URL 자가등록으로 새 고객이 병합되면 목록을 즉시 갱신
+  useEffect(() => {
+    const handler = () => setCustomers(loadCustomers());
+    window.addEventListener('jc-customers-updated', handler);
+    return () => window.removeEventListener('jc-customers-updated', handler);
+  }, []);
+
+  async function copyIntakeUrl() {
+    const url = `${window.location.origin}/?register=customer`;
+    try {
+      await navigator.clipboard.writeText(url);
+      alert('고객등록 URL이 복사되었습니다.\n고객에게 전송하면 고객이 직접 정보를 입력할 수 있습니다.');
+    } catch {
+      prompt('고객등록 URL을 복사해주세요.', url);
+    }
+  }
 
   const filtered = useMemo(() => {
     const term = search.trim();
@@ -214,6 +231,7 @@ export default function Customers({ orders }: { orders: Order[] }) {
       주소: c.address,
       도착일: c.arrivalDate || '',
       수량: c.quantity ?? '',
+      수령방식: c.receiveMethod || '',
       메모: c.memo,
     }));
     const ws = XLSX.utils.json_to_sheet(rows);
@@ -331,6 +349,9 @@ export default function Customers({ orders }: { orders: Order[] }) {
         <div className='header-actions'>
           {admin && (
             <>
+              <button className='btn' onClick={copyIntakeUrl} title='고객이 직접 정보를 입력하는 공개 링크 복사'>
+                🔗 고객등록 URL
+              </button>
               <button className='btn' onClick={exportCustomers}>
                 📤 엑셀 저장
               </button>
@@ -621,6 +642,9 @@ export default function Customers({ orders }: { orders: Order[] }) {
                         </span>
                         {orderCount > 0 && (
                           <span className='tag highlight'>{orderCount}건 주문</span>
+                        )}
+                        {customer.receiveMethod && (
+                          <span className='tag'>{customer.receiveMethod}</span>
                         )}
                         {customer.arrivalDate && (
                           <span className='tag'>도착 {customer.arrivalDate}</span>

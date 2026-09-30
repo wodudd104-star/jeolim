@@ -26,7 +26,7 @@ import {
   commitDataFiles,
   recordFailedLogin,
   resetFailedLogins,
-  hasDb,
+  hasKv,
   ensureKvTable,
   kvGet,
   kvSet,
@@ -93,7 +93,7 @@ const sessions = new Map();
 async function loadSessions() {
   try {
     let raw = null;
-    if (hasDb()) {
+    if (hasKv()) {
       raw = await kvGet('sessions');
     } else {
       raw = JSON.parse(fsSync.readFileSync(SESSIONS_FILE, 'utf-8'));
@@ -116,7 +116,7 @@ function scheduleSessionSave() {
     sessionSaveTimer = null;
     const obj = Object.fromEntries(sessions);
     try {
-      if (hasDb()) {
+      if (hasKv()) {
         await kvSet('sessions', obj);
       } else {
         fsSync.mkdirSync(path.dirname(SESSIONS_FILE), { recursive: true });
@@ -728,7 +728,7 @@ async function writeJsonSafe(file, data) {
 
 // DB(Supabase)가 연결되면 app_kv 테이블에 영구 저장, 아니면 로컬 JSON 폭백
 async function storeRead(kvKey, file, fallback) {
-  if (hasDb()) {
+  if (hasKv()) {
     const value = await kvGet(kvKey);
     return value === null || value === undefined ? fallback : value;
   }
@@ -736,7 +736,7 @@ async function storeRead(kvKey, file, fallback) {
 }
 
 async function storeWrite(kvKey, file, data) {
-  if (hasDb()) {
+  if (hasKv()) {
     await kvSet(kvKey, data);
     return;
   }
@@ -837,6 +837,73 @@ app.get('/api/public/gallery', async (_req, res) => {
   }
 });
 
+// ===== 고객 자가등록 (공개 URL 접수) =====
+const INTAKE_FILE = path.join(__dirname, 'src/lib/data/customer-intake.json');
+const intakeLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) =>
+    res.status(429).json({ error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' }),
+});
+
+app.post('/api/public/customer', intakeLimiter, async (req, res) => {
+  try {
+    const { name, phone, address, memo, arrivalDate, quantity, receiveMethod } = req.body || {};
+    const cleanPhone = String(phone || '').trim();
+    if (!cleanPhone) return res.status(400).json({ error: '연락처를 입력해주세요.' });
+    if (cleanPhone.replace(/\D/g, '').length < 9) {
+      return res.status(400).json({ error: '연락처 형식을 확인해주세요.' });
+    }
+    const entry = {
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      name: String(name || '').slice(0, 50),
+      phone: cleanPhone.slice(0, 20),
+      address: String(address || '').slice(0, 200),
+      memo: String(memo || '').slice(0, 500),
+      arrivalDate: /^\d{4}-\d{2}-\d{2}$/.test(String(arrivalDate || ''))
+        ? String(arrivalDate)
+        : undefined,
+      quantity:
+        Number.isFinite(Number(quantity)) && Number(quantity) > 0
+          ? Math.min(9999, Math.floor(Number(quantity)))
+          : undefined,
+      receiveMethod: ['방문', '배송', '택배'].includes(receiveMethod) ? receiveMethod : '방문',
+    };
+    const list = await storeRead('customer_intake', INTAKE_FILE, []);
+    const next = Array.isArray(list) ? list : [];
+    next.push(entry);
+    while (next.length > 200) next.shift();
+    await storeWrite('customer_intake', INTAKE_FILE, next);
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '접수에 실패했습니다. 잠시 후 다시 시도해주세요.' });
+  }
+});
+
+app.get('/api/customer-intake', requireAuth, async (_req, res) => {
+  try {
+    const list = await storeRead('customer_intake', INTAKE_FILE, []);
+    return res.json(Array.isArray(list) ? list : []);
+  } catch {
+    return res.status(500).json({ error: '접수 목록 조회에 실패했습니다.' });
+  }
+});
+
+app.post('/api/customer-intake/ack', requireAuth, async (req, res) => {
+  try {
+    const ids = new Set(Array.isArray(req.body?.ids) ? req.body.ids : []);
+    const list = await storeRead('customer_intake', INTAKE_FILE, []);
+    const next = (Array.isArray(list) ? list : []).filter((e) => !ids.has(e.id));
+    await storeWrite('customer_intake', INTAKE_FILE, next);
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '접수 확인 처리에 실패했습니다.' });
+  }
+});
+
 app.use(express.static(path.join(__dirname, 'dist')));
 
 app.get('*', (_req, res) => {
@@ -854,7 +921,7 @@ const PORT = process.env.PORT || 3000;
     await loadSessions();
     await migrateJsonToDb();
     // DB 모드 첫 부팅 시 이미지에 포함된 JSON 데이터를 DB로 이관
-    if (hasDb()) {
+    if (hasKv()) {
       for (const [kvKey, file, fallback] of [
         ['app_data', APP_DATA_FILE, {}],
         ['public_orders', PUBLIC_ORDERS_FILE, { orders: {} }],
