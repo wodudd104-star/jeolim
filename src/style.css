@@ -383,6 +383,66 @@ h1 {
   resize: vertical;
 }
 
+.phone-field {
+  position: relative;
+}
+
+.customer-suggest {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 12%);
+  z-index: 40;
+  max-height: 240px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+
+.customer-suggest-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid #f3f4f6;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+
+.customer-suggest-item:last-child {
+  border-bottom: none;
+}
+
+.customer-suggest-item:hover {
+  background: #f0fdf4;
+}
+
+.suggest-name {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: #111827;
+}
+
+.suggest-sub {
+  font-size: 0.78rem;
+  color: #6b7280;
+}
+
+.customer-loaded-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.78rem;
+  color: #16a34a;
+  font-weight: 600;
+}
+
 .panel {
   border: 1px solid #e5e7eb;
   border-radius: var(--radius);

@@ -4,9 +4,9 @@ import * as XLSX from 'xlsx';
 import './style.css';
 import { sendSms } from './lib/api';
 import { load, save } from './lib/storage';
-import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page } from './types';
+import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page, Customer } from './types';
 import Login, { isAdmin, isLoggedIn, performLogout } from './components/Login';
-import Customers from './components/Customers';
+import Customers, { loadCustomers, updateCustomer } from './components/Customers';
 import Admin, { AccountManager, getStoredAccountNumber } from './components/Admin';
 import Dashboard from './components/Dashboard';
 import Gallery from './components/Gallery';
@@ -152,6 +152,7 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [form, setForm] = useState({ ...emptyOrder });
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [loadedCustomerId, setLoadedCustomerId] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSmsOpen, setIsSmsOpen] = useState(false);
@@ -221,11 +222,69 @@ export default function App() {
   function resetForm() {
     setForm({ ...emptyOrder });
     setEditingId(null);
+    setLoadedCustomerId(null);
   }
 
   function openNewForm() {
     resetForm();
     setIsFormOpen(true);
+  }
+
+  const formPhoneDigits = form.phone.replace(/\D/g, '');
+  const customerMatches = useMemo(() => {
+    if (!isFormOpen || editingId || formPhoneDigits.length < 3) return [];
+    return loadCustomers()
+      .filter((c) => c.phone.replace(/\D/g, '').includes(formPhoneDigits))
+      .slice(0, 8);
+  }, [isFormOpen, editingId, formPhoneDigits]);
+
+  const loadedCustomer = useMemo(
+    () =>
+      loadedCustomerId
+        ? loadCustomers().find((c) => c.id === loadedCustomerId)
+        : undefined,
+    [loadedCustomerId]
+  );
+  const loadedCustomerActive =
+    !!loadedCustomer && loadedCustomer.phone.replace(/\D/g, '') === formPhoneDigits;
+  const showCustomerSuggest = customerMatches.length > 0 && !loadedCustomerActive;
+
+  function applyCustomer(customer: Customer) {
+    setForm((prev) => {
+      const quantity =
+        customer.quantity && customer.quantity > 0 ? customer.quantity : prev.quantity;
+      return {
+        ...prev,
+        name: customer.name,
+        phone: customer.phone,
+        address: customer.address,
+        memo: customer.memo || prev.memo,
+        pickupDate: customer.arrivalDate || prev.pickupDate,
+        quantity,
+        totalPrice: calcTotal(quantity, prev.pricePerUnit),
+      };
+    });
+    setLoadedCustomerId(customer.id);
+  }
+
+  function syncLoadedCustomer() {
+    if (!loadedCustomerId) return;
+    const target = loadCustomers().find((c) => c.id === loadedCustomerId);
+    if (!target) return;
+    if (target.phone.replace(/\D/g, '') !== form.phone.replace(/\D/g, '')) return;
+    const patch: Partial<Customer> = {};
+    if (form.name !== target.name) patch.name = form.name;
+    if (form.address !== target.address) patch.address = form.address;
+    if (form.memo !== target.memo) patch.memo = form.memo;
+    if (form.pickupDate && form.pickupDate !== (target.arrivalDate || '')) {
+      patch.arrivalDate = form.pickupDate;
+    }
+    if (form.quantity > 0 && form.quantity !== (target.quantity ?? 0)) {
+      patch.quantity = form.quantity;
+    }
+    if (Object.keys(patch).length > 0) {
+      updateCustomer(loadedCustomerId, patch);
+    }
   }
 
   function startEdit(order: Order) {
@@ -260,6 +319,7 @@ export default function App() {
       };
       setOrders((prev) => [newOrder, ...prev]);
     }
+    syncLoadedCustomer();
     resetForm();
     setIsFormOpen(false);
   }
@@ -691,16 +751,55 @@ export default function App() {
                         placeholder='미입력 가능'
                       />
                     </label>
-                    <label>
+                    <label className='phone-field'>
                       연락처
                       <input
                         className='input'
                         type='tel'
                         value={form.phone}
-                        onChange={(e) => setForm({ ...form, phone: formatPhone(e.target.value) })}
+                        onChange={(e) => {
+                          const phone = formatPhone(e.target.value);
+                          setForm({ ...form, phone });
+                          if (
+                            loadedCustomer &&
+                            phone.replace(/\D/g, '') !== loadedCustomer.phone.replace(/\D/g, '')
+                          ) {
+                            setLoadedCustomerId(null);
+                          }
+                        }}
                         placeholder='010-0000-0000'
                         maxLength={13}
+                        autoComplete='off'
                       />
+                      {showCustomerSuggest && (
+                        <div className='customer-suggest'>
+                          {customerMatches.map((c) => (
+                            <button
+                              type='button'
+                              key={c.id}
+                              className='customer-suggest-item'
+                              onClick={() => applyCustomer(c)}
+                            >
+                              <span className='suggest-name'>
+                                {c.name || '(이름 없음)'} · {c.phone}
+                              </span>
+                              {c.address && <span className='suggest-sub'>{c.address}</span>}
+                              {(c.arrivalDate || (c.quantity ?? 0) > 0) && (
+                                <span className='suggest-sub'>
+                                  {c.arrivalDate ? `도착 ${c.arrivalDate}` : ''}
+                                  {c.arrivalDate && (c.quantity ?? 0) > 0 ? ' · ' : ''}
+                                  {(c.quantity ?? 0) > 0 ? `${c.quantity}개` : ''}
+                                </span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {loadedCustomerActive && (
+                        <span className='customer-loaded-hint'>
+                          ✓ 고객 정보를 불러왔습니다. 수정하면 고객관리에도 자동 반영됩니다.
+                        </span>
+                      )}
                     </label>
                     <label>
                       품목

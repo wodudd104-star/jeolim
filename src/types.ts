@@ -40,6 +40,8 @@ export type Customer = {
   address: string;
   memo: string;
   photos?: string[];
+  arrivalDate?: string;
+  quantity?: number;
 };
 
 export type GalleryItem = {

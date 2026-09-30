@@ -21,6 +21,29 @@ export function saveCustomers(customers: Customer[]) {
   save(CUSTOMERS_KEY, customers);
 }
 
+export function updateCustomer(id: string, patch: Partial<Customer>) {
+  const customers = loadCustomers();
+  saveCustomers(customers.map((c) => (c.id === id ? { ...c, ...patch } : c)));
+}
+
+function normalizeExcelDate(value: string): string {
+  if (!value) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const kor = value.match(/(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+  if (kor) {
+    return `${kor[1]}-${String(kor[2]).padStart(2, '0')}-${String(kor[3]).padStart(2, '0')}`;
+  }
+  const slash = value.match(/(\d{4})[/.](\d{1,2})[/.](\d{1,2})/);
+  if (slash) {
+    return `${slash[1]}-${String(slash[2]).padStart(2, '0')}-${String(slash[3]).padStart(2, '0')}`;
+  }
+  const serial = Number(value);
+  if (!isNaN(serial) && serial > 30000 && serial < 60000) {
+    return new Date(Math.round((serial - 25569) * 86400 * 1000)).toISOString().slice(0, 10);
+  }
+  return '';
+}
+
 function formatPhone(value: string) {
   const digits = value.replace(/\D/g, '');
   if (digits.length <= 3) return digits;
@@ -50,6 +73,8 @@ export default function Customers({ orders }: { orders: Order[] }) {
     address: '',
     memo: '',
     photos: [],
+    arrivalDate: '',
+    quantity: undefined,
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
@@ -83,7 +108,7 @@ export default function Customers({ orders }: { orders: Order[] }) {
   }, [orders]);
 
   function resetForm() {
-    setForm({ name: '', phone: '', address: '', memo: '', photos: [] });
+    setForm({ name: '', phone: '', address: '', memo: '', photos: [], arrivalDate: '', quantity: undefined });
     setEditingId(null);
     if (photoInputRef.current) photoInputRef.current.value = '';
   }
@@ -100,6 +125,8 @@ export default function Customers({ orders }: { orders: Order[] }) {
       address: customer.address,
       memo: customer.memo,
       photos: customer.photos || [],
+      arrivalDate: customer.arrivalDate || '',
+      quantity: customer.quantity,
     });
     setEditingId(customer.id);
     setIsFormOpen(true);
@@ -228,6 +255,8 @@ export default function Customers({ orders }: { orders: Order[] }) {
       이름: c.name,
       연락처: c.phone,
       주소: c.address,
+      도착일: c.arrivalDate || '',
+      수량: c.quantity ?? '',
       메모: c.memo,
     }));
     const ws = XLSX.utils.json_to_sheet(rows);
@@ -253,6 +282,14 @@ export default function Customers({ orders }: { orders: Order[] }) {
             name: getCell(row, ['이름', 'Name', '고객명', 'name', '성명']),
             phone: getCell(row, ['연락처', 'Phone', '전화번호', 'phone', '휴폰', '휴 대폰']),
             address: getCell(row, ['주소', 'Address', 'address', '배송주소']),
+            arrivalDate: normalizeExcelDate(
+              getCell(row, ['도착일', '도착예정일', '수령일', '수령예정일', '도착날짜'])
+            ),
+            quantity: (() => {
+              const raw = getCell(row, ['수량', '개수', 'quantity', 'Quantity']);
+              const n = parseInt(raw.replace(/\D/g, ''), 10);
+              return isNaN(n) ? undefined : n;
+            })(),
             memo: getCell(row, ['메모', 'Memo', 'memo', '특이사항', '비고']),
           }))
           .filter((c) => c.name || c.phone)
@@ -262,6 +299,8 @@ export default function Customers({ orders }: { orders: Order[] }) {
             name: c.name || '',
             phone: formatPhone(c.phone),
             address: c.address,
+            arrivalDate: c.arrivalDate || undefined,
+            quantity: c.quantity,
             memo: c.memo,
           }));
 
@@ -418,6 +457,32 @@ export default function Customers({ orders }: { orders: Order[] }) {
                   maxLength={13}
                 />
               </label>
+              <label>
+                도착 예정일 (선택)
+                <input
+                  className='input'
+                  type='date'
+                  value={form.arrivalDate || ''}
+                  onChange={(e) => setForm({ ...form, arrivalDate: e.target.value })}
+                />
+              </label>
+              <label>
+                수량 (선택)
+                <input
+                  className='input'
+                  type='number'
+                  min={0}
+                  value={form.quantity ?? ''}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      quantity:
+                        e.target.value === '' ? undefined : Math.max(0, Number(e.target.value)),
+                    })
+                  }
+                  placeholder='주문 수량'
+                />
+              </label>
               <label className='full'>
                 주소
                 <div className='address-row'>
@@ -570,6 +635,12 @@ export default function Customers({ orders }: { orders: Order[] }) {
                     </span>
                     {orderCount > 0 && (
                       <span className='tag highlight'>{orderCount}건 주문</span>
+                    )}
+                    {customer.arrivalDate && (
+                      <span className='tag'>도착 {customer.arrivalDate}</span>
+                    )}
+                    {(customer.quantity ?? 0) > 0 && (
+                      <span className='tag highlight'>{customer.quantity}개</span>
                     )}
                   </div>
                   {admin && (
