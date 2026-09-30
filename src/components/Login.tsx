@@ -108,7 +108,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       return;
     }
     setLoading(true);
-    const { error: err } = await supabase.auth.signUp({
+    const { data, error: err } = await supabase.auth.signUp({
       email,
       password,
       options: {
@@ -120,8 +120,17 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       setError(err.message || '회원가입에 실패했습니다.');
       return;
     }
-    alert('회원가입이 완료되었습니다. 관리자 승인 후 로그인할 수 있습니다.');
-    setMode('login');
+    if (data.user) {
+      const role = data.user.user_metadata?.role === 'admin' ? 'admin' : 'user';
+      sessionStorage.setItem(AUTH_SESSION_KEY, '1');
+      sessionStorage.setItem(AUTH_ROLE_KEY, role);
+      setStoredUser({
+        id: data.user.id,
+        role,
+        email: data.user.email || '',
+      });
+      onLogin();
+    }
   }
 
   return (
