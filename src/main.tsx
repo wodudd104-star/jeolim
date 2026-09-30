@@ -9,9 +9,26 @@ import Login, { isAdmin, isLoggedIn, performLogout } from './components/Login';
 import Customers from './components/Customers';
 import Admin, { AccountManager, getStoredAccountNumber } from './components/Admin';
 import Dashboard from './components/Dashboard';
+import Gallery from './components/Gallery';
 
 const STATUS_LIST: OrderStatus[] = ['접수', '준비중', '완료', '취소'];
 const PICKUP_LIST: PickupType[] = ['매장방문', '배송'];
+const COURIER_LIST = [
+  'CJ대한통운',
+  '롯데택배',
+  '한진택배',
+  '로젠택배',
+  '우체국택배',
+  '경동택배',
+  '합동택배',
+  'CU편의점택배',
+  'GS편의점택배',
+  '대신택배',
+  '천일택배',
+  '농협택배',
+  '일양로지스',
+  '기타',
+];
 const ORDERS_KEY = 'jc_orders_v3';
 const PRODUCTS_KEY = 'jc_products_v1';
 
@@ -122,6 +139,8 @@ const emptyOrder: Omit<Order, 'id' | 'createdAt'> = {
   memo: '',
   status: '접수',
   deposit: false,
+  courier: '',
+  trackingNumber: '',
 };
 
 export default function App() {
@@ -313,6 +332,8 @@ export default function App() {
       수령방식: o.pickup,
       희망일: formatDate(o.pickupDate),
       주소: o.address,
+      택배사: o.courier || '',
+      운송장번호: o.trackingNumber || '',
       메모: o.memo,
     }));
     const ws = XLSX.utils.json_to_sheet(rows);
@@ -490,6 +511,8 @@ export default function App() {
                   ? '주문 관리'
                   : page === 'customers'
                   ? '고객 관리'
+                  : page === 'gallery'
+                  ? '사진 등록'
                   : '관리자 설정'}
               </h1>
             </div>
@@ -514,6 +537,14 @@ export default function App() {
                   onClick={() => setPage('customers')}
                 >
                   고객
+                </button>
+              )}
+              {isAdmin() && (
+                <button
+                  className={`btn ${page === 'gallery' ? 'active' : ''}`}
+                  onClick={() => setPage('gallery')}
+                >
+                  🖼 사진등록
                 </button>
               )}
               {isAdmin() && (
@@ -582,6 +613,8 @@ export default function App() {
           <Dashboard orders={orders} products={products} />
         ) : page === 'customers' && isAdmin() ? (
           <Customers orders={orders} />
+        ) : page === 'gallery' && isAdmin() ? (
+          <Gallery />
         ) : page === 'admin' && isAdmin() ? (
           <Admin />
         ) : (
@@ -792,6 +825,34 @@ export default function App() {
                         </div>
                       </label>
                     )}
+                    {form.pickup === '배송' && (
+                      <>
+                        <label>
+                          택배사 (선택)
+                          <select
+                            className='select'
+                            value={form.courier || ''}
+                            onChange={(e) => setForm({ ...form, courier: e.target.value })}
+                          >
+                            <option value=''>택배사 선택</option>
+                            {COURIER_LIST.map((c) => (
+                              <option key={c} value={c}>
+                                {c}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label>
+                          운송장번호 (선택)
+                          <input
+                            className='input'
+                            value={form.trackingNumber || ''}
+                            onChange={(e) => setForm({ ...form, trackingNumber: e.target.value })}
+                            placeholder='숫자 또는 운송장번호 입력'
+                          />
+                        </label>
+                      </>
+                    )}
                     <label className='full'>
                       메모
                       <input
@@ -906,6 +967,10 @@ export default function App() {
                           <span className='tag highlight'>{formatCurrency(order.totalPrice)}</span>
                           <span className='tag'>{order.pickup}</span>
                           {order.address && <span className='tag'>{order.address}</span>}
+                          {order.courier && <span className='tag'>{order.courier}</span>}
+                          {order.trackingNumber && (
+                            <span className='tag highlight'>운송장 {order.trackingNumber}</span>
+                          )}
                         </div>
                         <div className='payment-row'>
                           <label className='deposit-label'>
@@ -954,6 +1019,10 @@ export default function App() {
 
 function personalizeMessage(template: string, order: Order) {
   const balance = order.totalPrice - order.depositAmount;
+  const trackingText =
+    order.courier && order.trackingNumber
+      ? `${order.courier} ${order.trackingNumber}`
+      : order.trackingNumber || order.courier || '';
   return template
     .split('{이름}').join(`${order.name} 고객님`)
     .split('{품목}').join(order.cabbageType)
@@ -963,6 +1032,8 @@ function personalizeMessage(template: string, order: Order) {
     .split('{입금액}').join(formatCurrency(order.depositAmount))
     .split('{수령일}').join(formatDate(order.pickupDate))
     .split('{주문URL}').join(getOrderPublicUrl(order.id))
+    .split('{택배사}').join(order.courier || '')
+    .split('{운송장번호}').join(trackingText)
     .split('{계좌번호}').join(getStoredAccountNumber());
 }
 
@@ -1029,6 +1100,18 @@ function Receipt({ order }: { order: Order }) {
         <div className='receipt-line'>
           <span>주소</span>
           <span>{order.address}</span>
+        </div>
+      )}
+      {order.courier && (
+        <div className='receipt-line'>
+          <span>택배사</span>
+          <span>{order.courier}</span>
+        </div>
+      )}
+      {order.trackingNumber && (
+        <div className='receipt-line'>
+          <span>운송장번호</span>
+          <span>{order.trackingNumber}</span>
         </div>
       )}
       {order.memo && (
@@ -1142,6 +1225,18 @@ function PublicOrderView({ order }: { order: Order | undefined }) {
               <div className='info-row'>
                 <span>주소</span>
                 <span>{order.address}</span>
+              </div>
+            )}
+            {order.courier && (
+              <div className='info-row'>
+                <span>택배사</span>
+                <span>{order.courier}</span>
+              </div>
+            )}
+            {order.trackingNumber && (
+              <div className='info-row'>
+                <span>운송장번호</span>
+                <span>{order.trackingNumber}</span>
               </div>
             )}
             {order.memo && (
@@ -1384,7 +1479,7 @@ function SmsModal({ orders, onClose }: { orders: Order[]; onClose: () => void })
         <div className='sms-section'>
           <div className='sms-section-title'>메시지</div>
           <div className='template-tags'>
-            {['{이름}', '{품목}', '{수량}', '{금액}', '{잔액}', '{입금액}', '{수령일}', '{주문URL}', '{계좌번호}'].map((tag) => (
+            {['{이름}', '{품목}', '{수량}', '{금액}', '{잔액}', '{입금액}', '{수령일}', '{주문URL}', '{택배사}', '{운송장번호}', '{계좌번호}'].map((tag) => (
               <button key={tag} className='btn small tag-btn' onClick={() => applyTemplate(tag)}>
                 {tag}
               </button>

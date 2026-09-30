@@ -28,6 +28,8 @@ export type Order = {
   memo: string;
   status: OrderStatus;
   deposit: boolean;
+  courier?: string;
+  trackingNumber?: string;
 };
 
 export type Customer = {
@@ -37,6 +39,13 @@ export type Customer = {
   phone: string;
   address: string;
   memo: string;
+  photos?: string[];
 };
 
-export type Page = 'dashboard' | 'orders' | 'customers' | 'admin';
+export type GalleryItem = {
+  id: string;
+  image: string;
+  note: string;
+};
+
+export type Page = 'dashboard' | 'orders' | 'customers' | 'admin' | 'gallery';

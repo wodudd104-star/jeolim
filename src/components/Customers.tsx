@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { Customer, Order } from '../types';
 import { load, save } from '../lib/storage';
+import { compressImage, saveSafely } from '../lib/images';
 import { isAdmin } from './Login';
 
 declare global {
@@ -48,8 +49,12 @@ export default function Customers({ orders }: { orders: Order[] }) {
     phone: '',
     address: '',
     memo: '',
+    photos: [],
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
+
+  const MAX_CUSTOMER_PHOTOS = 5;
 
   const admin = isAdmin();
 
@@ -78,8 +83,9 @@ export default function Customers({ orders }: { orders: Order[] }) {
   }, [orders]);
 
   function resetForm() {
-    setForm({ name: '', phone: '', address: '', memo: '' });
+    setForm({ name: '', phone: '', address: '', memo: '', photos: [] });
     setEditingId(null);
+    if (photoInputRef.current) photoInputRef.current.value = '';
   }
 
   function openNewForm() {
@@ -93,6 +99,7 @@ export default function Customers({ orders }: { orders: Order[] }) {
       phone: customer.phone,
       address: customer.address,
       memo: customer.memo,
+      photos: customer.photos || [],
     });
     setEditingId(customer.id);
     setIsFormOpen(true);
@@ -100,7 +107,50 @@ export default function Customers({ orders }: { orders: Order[] }) {
 
   function commitCustomers(next: Customer[]) {
     setCustomers(next);
-    saveCustomers(next);
+    if (!saveSafely((v) => saveCustomers(v as Customer[]), next)) {
+      setCustomers(customers);
+    }
+  }
+
+  async function handlePhotoSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+    const current = form.photos || [];
+    const remaining = MAX_CUSTOMER_PHOTOS - current.length;
+    if (remaining <= 0) {
+      alert(`사진은 최대 ${MAX_CUSTOMER_PHOTOS}장까지 등록할 수 있습니다.`);
+      if (photoInputRef.current) photoInputRef.current.value = '';
+      return;
+    }
+    const targets = files.slice(0, remaining);
+    if (files.length > remaining) {
+      alert(`최대 ${MAX_CUSTOMER_PHOTOS}장까지 가능하여 ${remaining}장만 추가됩니다.`);
+    }
+    try {
+      const compressed = await Promise.all(targets.map((f) => compressImage(f)));
+      setForm((prev) => ({ ...prev, photos: [...(prev.photos || []), ...compressed] }));
+    } catch (err: any) {
+      alert(err.message || '이미지를 처리하는 중 오류가 발생했습니다.');
+    } finally {
+      if (photoInputRef.current) photoInputRef.current.value = '';
+    }
+  }
+
+  function removePhoto(index: number) {
+    setForm((prev) => ({
+      ...prev,
+      photos: (prev.photos || []).filter((_, i) => i !== index),
+    }));
+  }
+
+  function movePhoto(index: number, direction: -1 | 1) {
+    setForm((prev) => {
+      const photos = [...(prev.photos || [])];
+      const target = index + direction;
+      if (target < 0 || target >= photos.length) return prev;
+      [photos[index], photos[target]] = [photos[target], photos[index]];
+      return { ...prev, photos };
+    });
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -397,6 +447,66 @@ export default function Customers({ orders }: { orders: Order[] }) {
                   placeholder='특이사항'
                 />
               </label>
+              <div className='full photo-field'>
+                <span className='photo-field-label'>
+                  사진 (선택, 최대 {MAX_CUSTOMER_PHOTOS}장)
+                </span>
+                <div className='photo-grid'>
+                  {(form.photos || []).map((photo, idx) => (
+                    <div key={idx} className='photo-item'>
+                      <img src={photo} alt={`고객 사진 ${idx + 1}`} />
+                      <div className='photo-item-actions'>
+                        <button
+                          type='button'
+                          className='btn icon small'
+                          onClick={() => movePhoto(idx, -1)}
+                          disabled={idx === 0}
+                          title='앞으로'
+                        >
+                          ◀
+                        </button>
+                        <button
+                          type='button'
+                          className='btn icon small'
+                          onClick={() => movePhoto(idx, 1)}
+                          disabled={idx === (form.photos || []).length - 1}
+                          title='뒤로'
+                        >
+                          ▶
+                        </button>
+                        <button
+                          type='button'
+                          className='btn icon small danger'
+                          onClick={() => removePhoto(idx)}
+                          title='삭제'
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {(form.photos || []).length < MAX_CUSTOMER_PHOTOS && (
+                    <button
+                      type='button'
+                      className='photo-add'
+                      onClick={() => photoInputRef.current?.click()}
+                    >
+                      📷 사진 추가
+                      <span className='photo-add-count'>
+                        {(form.photos || []).length}/{MAX_CUSTOMER_PHOTOS}
+                      </span>
+                    </button>
+                  )}
+                </div>
+                <input
+                  ref={photoInputRef}
+                  type='file'
+                  accept='image/*'
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={handlePhotoSelect}
+                />
+              </div>
             </div>
             <div className='form-actions'>
               <button
@@ -486,6 +596,13 @@ export default function Customers({ orders }: { orders: Order[] }) {
                 )}
                 {customer.memo && (
                   <p className='customer-memo'>{customer.memo}</p>
+                )}
+                {customer.photos && customer.photos.length > 0 && (
+                  <div className='customer-photos'>
+                    {customer.photos.map((photo, idx) => (
+                      <img key={idx} src={photo} alt={`고객 사진 ${idx + 1}`} />
+                    ))}
+                  </div>
                 )}
               </article>
             );
