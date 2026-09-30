@@ -12,9 +12,6 @@ import {
 } from '../lib/api';
 
 const AUTH_USER_KEY = 'jc_auth_user_v1';
-const ORDERS_KEY = 'jc_orders_v3';
-const CUSTOMERS_KEY = 'jc_customers_v1';
-const PRODUCTS_KEY = 'jc_products_v1';
 const ACCOUNT_NUMBERS_KEY = 'jc_accounts';
 
 export type AdminAuth = {
@@ -292,17 +289,23 @@ export default function Admin() {
     }
   }
 
-  function clearAllData() {
+  async function clearAllData() {
     if (
       confirm(
         '정말 모든 데이터를 삭제할까요?\n주문, 고객, 품목 설정이 모두 사라집니다.'
       )
     ) {
-      localStorage.removeItem(ORDERS_KEY);
-      localStorage.removeItem(CUSTOMERS_KEY);
-      localStorage.removeItem(PRODUCTS_KEY);
-      alert('모든 데이터가 삭제되었습니다. 페이지를 새로고침합니다.');
-      window.location.reload();
+      try {
+        await Promise.all([
+          supabase.from('orders').delete().neq('id', ''),
+          supabase.from('customers').delete().neq('id', ''),
+          supabase.from('products').delete().neq('id', ''),
+        ]);
+        alert('모든 데이터가 삭제되었습니다. 페이지를 새로고침합니다.');
+        window.location.reload();
+      } catch (err: any) {
+        alert(err.message || '데이터 삭제에 실패했습니다.');
+      }
     }
   }
 

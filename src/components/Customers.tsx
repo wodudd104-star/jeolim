@@ -1,23 +1,18 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { Customer, Order } from '../types';
-import { load, save } from '../lib/storage';
 import { isAdmin } from './Login';
+import {
+  deleteCustomer,
+  fetchCustomers,
+  insertCustomer,
+  updateCustomer,
+} from '../lib/data';
 
 declare global {
   interface Window {
     daum: any;
   }
-}
-
-const CUSTOMERS_KEY = 'jc_customers_v1';
-
-export function loadCustomers(): Customer[] {
-  return load(CUSTOMERS_KEY, []);
-}
-
-export function saveCustomers(customers: Customer[]) {
-  save(CUSTOMERS_KEY, customers);
 }
 
 function formatPhone(value: string) {
@@ -38,7 +33,8 @@ function getCell(row: Record<string, any>, keys: string[]): string {
 }
 
 export default function Customers({ orders }: { orders: Order[] }) {
-  const [customers, setCustomers] = useState<Customer[]>(() => loadCustomers());
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -51,6 +47,21 @@ export default function Customers({ orders }: { orders: Order[] }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const admin = isAdmin();
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchCustomers()
+      .then((list) => {
+        if (!cancelled) setCustomers(list);
+      })
+      .catch((err) => alert(err.message || '고객 목록을 불러오지 못했습니다.'))
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filtered = useMemo(() => {
     const term = search.trim();
@@ -97,37 +108,36 @@ export default function Customers({ orders }: { orders: Order[] }) {
     setIsFormOpen(true);
   }
 
-  function commitCustomers(next: Customer[]) {
-    setCustomers(next);
-    saveCustomers(next);
-  }
-
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!form.name.trim()) {
       alert('고객명을 입력해주세요.');
       return;
     }
-    if (editingId) {
-      const updated = customers.map((c) =>
-        c.id === editingId ? { ...c, ...form } : c
-      );
-      commitCustomers(updated);
-    } else {
-      const newCustomer: Customer = {
-        ...form,
-        id: crypto.randomUUID(),
-        createdAt: new Date().toISOString(),
-      };
-      commitCustomers([...customers, newCustomer]);
+    try {
+      if (editingId) {
+        await updateCustomer(editingId, form);
+        setCustomers((prev) =>
+          prev.map((c) => (c.id === editingId ? { ...c, ...form } : c))
+        );
+      } else {
+        const newCustomer = await insertCustomer(form);
+        setCustomers((prev) => [...prev, newCustomer]);
+      }
+      resetForm();
+      setIsFormOpen(false);
+    } catch (err: any) {
+      alert(err.message || '고객 저장에 실패했습니다.');
     }
-    resetForm();
-    setIsFormOpen(false);
   }
 
-  function removeCustomer(id: string) {
-    if (confirm('이 고객을 삭제할까요?')) {
-      commitCustomers(customers.filter((c) => c.id !== id));
+  async function removeCustomer(id: string) {
+    if (!confirm('이 고객을 삭제할까요?')) return;
+    try {
+      await deleteCustomer(id);
+      setCustomers((prev) => prev.filter((c) => c.id !== id));
+    } catch (err: any) {
+      alert(err.message || '고객 삭제에 실패했습니다.');
     }
   }
 
@@ -144,11 +154,11 @@ export default function Customers({ orders }: { orders: Order[] }) {
     XLSX.writeFile(wb, `절임배추_고객목록_${new Date().toISOString().slice(0, 10)}.xlsx`);
   }
 
-  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
         const data = new Uint8Array(event.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array' });
@@ -156,7 +166,7 @@ export default function Customers({ orders }: { orders: Order[] }) {
         const sheet = workbook.Sheets[sheetName];
         const rows = XLSX.utils.sheet_to_json(sheet) as Record<string, any>[];
 
-        const imported: Customer[] = rows
+        const imported = rows
           .map((row) => ({
             name: getCell(row, ['이름', 'Name', '고객명', 'name', '성명']),
             phone: getCell(row, ['연락처', 'Phone', '전화번호', 'phone', '휴폰', '휴 대폰']),
@@ -165,8 +175,6 @@ export default function Customers({ orders }: { orders: Order[] }) {
           }))
           .filter((c) => c.name || c.phone)
           .map((c) => ({
-            id: crypto.randomUUID(),
-            createdAt: new Date().toISOString(),
             name: c.name,
             phone: formatPhone(c.phone),
             address: c.address,
@@ -179,10 +187,14 @@ export default function Customers({ orders }: { orders: Order[] }) {
         }
 
         if (confirm(`${imported.length}명의 고객을 추가할까요?`)) {
-          commitCustomers([...customers, ...imported]);
+          const created: Customer[] = [];
+          for (const c of imported) {
+            created.push(await insertCustomer(c));
+          }
+          setCustomers((prev) => [...prev, ...created]);
         }
-      } catch (err) {
-        alert('엑셀 파일을 읽는 중 오류가 발생했습니다.');
+      } catch (err: any) {
+        alert(err.message || '엑셀 파일을 읽는 중 오류가 발생했습니다.');
       } finally {
         if (fileInputRef.current) fileInputRef.current.value = '';
       }
@@ -231,6 +243,10 @@ export default function Customers({ orders }: { orders: Order[] }) {
     } catch (err) {
       alert('주소 검색을 불러오는 중 오류가 발생했습니다.');
     }
+  }
+
+  if (loading) {
+    return <div className='customer-shell'><div className='empty'>불러오는 중...</div></div>;
   }
 
   return (
