@@ -42,6 +42,7 @@ export default function Customers({ orders }: { orders: Order[] }) {
   const [search, setSearch] = useState('');
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [form, setForm] = useState<Omit<Customer, 'id' | 'createdAt'>>({
     name: '',
     phone: '',
@@ -128,7 +129,48 @@ export default function Customers({ orders }: { orders: Order[] }) {
   function removeCustomer(id: string) {
     if (confirm('이 고객을 삭제할까요?')) {
       commitCustomers(customers.filter((c) => c.id !== id));
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
+  }
+
+  const allSelected =
+    admin && filtered.length > 0 && filtered.every((c) => selectedIds.has(c.id));
+  const someSelected = filtered.some((c) => selectedIds.has(c.id));
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds((prev) => {
+      if (allSelected) {
+        const next = new Set(prev);
+        filtered.forEach((c) => next.delete(c.id));
+        return next;
+      }
+      const next = new Set(prev);
+      filtered.forEach((c) => next.add(c.id));
+      return next;
+    });
+  }
+
+  function removeSelected() {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`선택한 ${selectedIds.size}명의 고객을 삭제할까요?`)) return;
+    commitCustomers(customers.filter((c) => !selectedIds.has(c.id)));
+    setSelectedIds(new Set());
   }
 
   function exportCustomers() {
@@ -272,6 +314,31 @@ export default function Customers({ orders }: { orders: Order[] }) {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
+        {admin && filtered.length > 0 && (
+          <div className='selection-controls'>
+            <label className='select-all-label'>
+              <input
+                type='checkbox'
+                checked={allSelected}
+                ref={(el) => {
+                  if (el) el.indeterminate = !allSelected && someSelected;
+                }}
+                onChange={toggleSelectAll}
+              />
+              전체 선택
+            </label>
+            <span className='selection-count'>
+              {selectedIds.size > 0 ? `${selectedIds.size}명 선택됨` : ''}
+            </span>
+            <button
+              className='btn danger'
+              disabled={selectedIds.size === 0}
+              onClick={removeSelected}
+            >
+              🗑 선택 삭제
+            </button>
+          </div>
+        )}
       </section>
 
       {admin && isFormOpen && (
@@ -372,8 +439,20 @@ export default function Customers({ orders }: { orders: Order[] }) {
             const phoneDigits = customer.phone.replace(/\D/g, '');
             const orderCount = orderCounts.get(phoneDigits) || 0;
             return (
-              <article key={customer.id} className='customer-card'>
+              <article
+                key={customer.id}
+                className={`customer-card${selectedIds.has(customer.id) ? ' selected' : ''}`}
+              >
                 <div className='customer-row head'>
+                  {admin && (
+                    <input
+                      type='checkbox'
+                      className='customer-check'
+                      checked={selectedIds.has(customer.id)}
+                      onChange={() => toggleSelect(customer.id)}
+                      aria-label={`${customer.name || customer.phone || '고객'} 선택`}
+                    />
+                  )}
                   <div className='customer-meta'>
                     <span className='customer-name'>{customer.name}</span>
                     <span className='customer-phone'>
