@@ -10,6 +10,8 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "2.117.2",
+    "@verdent/auth-js": "0.1.9",
     "@vitejs/plugin-react": "^4.3.4",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",

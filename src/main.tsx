@@ -4,6 +4,7 @@ import * as XLSX from 'xlsx';
 import './style.css';
 import { sendSms } from './lib/api';
 import { load, save } from './lib/storage';
+import { supabase } from './lib/supabase';
 import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page } from './types';
 import Login, { isAdmin, isLoggedIn, logout } from './components/Login';
 import Customers from './components/Customers';
@@ -97,6 +98,15 @@ export default function App() {
   useEffect(() => {
     setOrders(load(ORDERS_KEY, []));
     setProducts(load(PRODUCTS_KEY, defaultProducts));
+  }, []);
+
+  useEffect(() => {
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setLoggedIn(!!session?.user);
+    });
+    return () => {
+      listener.subscription.unsubscribe();
+    };
   }, []);
 
   useEffect(() => save(ORDERS_KEY, orders), [orders]);
