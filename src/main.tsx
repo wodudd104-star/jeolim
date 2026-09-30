@@ -5,7 +5,7 @@ import './style.css';
 import { sendSms } from './lib/api';
 import { load, save } from './lib/storage';
 import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page } from './types';
-import Login, { isAdmin, isLoggedIn, logout } from './components/Login';
+import Login, { isAdmin, isLoggedIn, performLogout } from './components/Login';
 import Customers from './components/Customers';
 import Admin, { AccountManager, getStoredAccountNumber } from './components/Admin';
 import Dashboard from './components/Dashboard';
@@ -272,8 +272,8 @@ export default function App() {
     XLSX.writeFile(wb, `절임배추_주문목록_${new Date().toISOString().slice(0, 10)}.xlsx`);
   }
 
-  function handleLogout() {
-    logout();
+  async function handleLogout() {
+    await performLogout();
     setLoggedIn(false);
     setPage('orders');
   }

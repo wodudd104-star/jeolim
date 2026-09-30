@@ -4,11 +4,16 @@ function getUrl(path: string) {
   return API_URL ? `${API_URL}${path}` : path;
 }
 
+function getHeaders(): Record<string, string> {
+  return { 'Content-Type': 'application/json' };
+}
+
 export async function sendSms(recipients: string[], message: string) {
   const res = await fetch(getUrl('/api/send-sms'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify({ recipients, message }),
+    credentials: 'include',
   });
 
   const data = await res.json().catch(() => ({}));
@@ -21,19 +26,40 @@ export async function sendSms(recipients: string[], message: string) {
 export async function login(id: string, password: string) {
   const res = await fetch(getUrl('/api/login'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify({ id, password }),
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '로그인 실패');
   return data as { id: string; email: string; role: string; active: boolean };
 }
 
+export async function logout() {
+  const res = await fetch(getUrl('/api/logout'), {
+    method: 'POST',
+    credentials: 'include',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || '로그아웃 실패');
+  return data;
+}
+
+export async function me() {
+  const res = await fetch(getUrl('/api/me'), {
+    credentials: 'include',
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) return null;
+  return data as { id: string; email: string; role: string; active: boolean };
+}
+
 export async function registerAccount(id: string, password: string, email: string) {
   const res = await fetch(getUrl('/api/register'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify({ id, password, email }),
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '회원가입 실패');
@@ -41,7 +67,9 @@ export async function registerAccount(id: string, password: string, email: strin
 }
 
 export async function fetchUsers() {
-  const res = await fetch(getUrl('/api/users'));
+  const res = await fetch(getUrl('/api/users'), {
+    credentials: 'include',
+  });
   const data = await res.json().catch(() => []);
   if (!res.ok) throw new Error(data.error || '사용자 목록 조회 실패');
   return data as { id: string; email: string; role: string; active: boolean; createdAt: string }[];
@@ -50,6 +78,7 @@ export async function fetchUsers() {
 export async function activateUser(id: string) {
   const res = await fetch(getUrl(`/api/users/${encodeURIComponent(id)}/activate`), {
     method: 'POST',
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '활성화 실패');
@@ -59,6 +88,7 @@ export async function activateUser(id: string) {
 export async function deactivateUser(id: string) {
   const res = await fetch(getUrl(`/api/users/${encodeURIComponent(id)}/deactivate`), {
     method: 'POST',
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '비활성화 실패');
@@ -68,6 +98,7 @@ export async function deactivateUser(id: string) {
 export async function promoteUser(id: string) {
   const res = await fetch(getUrl(`/api/users/${encodeURIComponent(id)}/promote`), {
     method: 'POST',
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '관리자 임명 실패');
@@ -77,6 +108,7 @@ export async function promoteUser(id: string) {
 export async function demoteUser(id: string) {
   const res = await fetch(getUrl(`/api/users/${encodeURIComponent(id)}/demote`), {
     method: 'POST',
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '일반 사용자로 변경 실패');
@@ -86,6 +118,7 @@ export async function demoteUser(id: string) {
 export async function deleteUser(id: string) {
   const res = await fetch(getUrl(`/api/users/${encodeURIComponent(id)}`), {
     method: 'DELETE',
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '삭제 실패');
@@ -95,8 +128,9 @@ export async function deleteUser(id: string) {
 export async function findIdByEmail(email: string) {
   const res = await fetch(getUrl('/api/find-id'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify({ email }),
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '아이디 찾기 실패');
@@ -106,8 +140,9 @@ export async function findIdByEmail(email: string) {
 export async function sendResetCode(email: string) {
   const res = await fetch(getUrl('/api/send-reset-code'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify({ email }),
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '인증번호 발송 실패');
@@ -117,8 +152,9 @@ export async function sendResetCode(email: string) {
 export async function resetPassword(email: string, code: string, newPassword: string) {
   const res = await fetch(getUrl('/api/reset-password'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify({ email, code, newPassword }),
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '비밀번호 재설정 실패');
@@ -128,8 +164,9 @@ export async function resetPassword(email: string, code: string, newPassword: st
 export async function createUser(id: string, password: string, email: string, role: string, active: boolean) {
   const res = await fetch(getUrl('/api/users'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders(),
     body: JSON.stringify({ id, password, email, role, active }),
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '회원 추가 실패');
@@ -137,7 +174,6 @@ export async function createUser(id: string, password: string, email: string, ro
 }
 
 export async function updateServerAuth(
-  currentId: string,
   currentPassword: string,
   newId: string,
   newPassword: string,
@@ -145,8 +181,9 @@ export async function updateServerAuth(
 ) {
   const res = await fetch(getUrl('/api/update-auth'), {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ currentId, currentPassword, newId, newPassword, email }),
+    headers: getHeaders(),
+    body: JSON.stringify({ currentPassword, newId, newPassword, email }),
+    credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '서버 계정 정보 수정 실패');

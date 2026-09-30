@@ -1,5 +1,5 @@
 import pg from 'pg';
-import crypto from 'crypto';
+import bcrypt from 'bcrypt';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -12,6 +12,8 @@ const AUTH_FILE = path.join(__dirname, 'data', 'auth.json');
 const AUTH_BACKUP_FILE = path.join(__dirname, 'data', 'members-backup.json');
 const DATABASE_URL = process.env.DATABASE_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+
+const SALT_ROUNDS = 12;
 
 let pool = null;
 
@@ -34,30 +36,28 @@ export async function ensureUsersTable() {
     CREATE TABLE IF NOT EXISTS users (
       id VARCHAR(255) PRIMARY KEY,
       email VARCHAR(255) NOT NULL UNIQUE,
-      salt VARCHAR(255) NOT NULL,
       hash VARCHAR(255) NOT NULL,
       role VARCHAR(50) NOT NULL DEFAULT 'user',
       active BOOLEAN NOT NULL DEFAULT false,
+      failed_logins INT NOT NULL DEFAULT 0,
+      locked_until TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
 }
 
-export function hashPassword(password) {
-  const salt = crypto.randomUUID();
-  const hash = crypto.createHmac('sha256', salt).update(password).digest('hex');
-  return { salt, hash };
+export async function hashPassword(password) {
+  return bcrypt.hash(password, SALT_ROUNDS);
 }
 
-export function verifyPassword(password, salt, hash) {
-  const computed = crypto.createHmac('sha256', salt).update(password).digest('hex');
-  return computed === hash;
+export async function verifyPassword(password, hash) {
+  if (!password || !hash) return false;
+  return bcrypt.compare(password, hash);
 }
 
 async function loadJsonUsers() {
   let parsed = null;
 
-  // GitHub에서 최신 데이터를 먼저 가져옵니다 (Render 재시작 대응)
   if (GITHUB_TOKEN) {
     const repo = await getGitHubRepo();
     if (repo) {
@@ -100,7 +100,6 @@ async function loadJsonUsers() {
         {
           id: parsed.id,
           email: parsed.email || '',
-          salt: parsed.salt,
           hash: parsed.hash,
           role: parsed.role || 'admin',
           active: parsed.active !== false,
@@ -141,10 +140,6 @@ async function getGitHubRepo() {
     // ignore
   }
   return null;
-}
-
-async function fetchRepoFromGitHub() {
-  return getGitHubRepo();
 }
 
 async function fetchFileFromGitHub(repo, filePath) {
@@ -219,10 +214,11 @@ function rowToUser(row) {
   return {
     id: row.id,
     email: row.email,
-    salt: row.salt,
     hash: row.hash,
     role: row.role,
     active: row.active,
+    failed_logins: row.failed_logins,
+    locked_until: row.locked_until,
     createdAt: row.created_at,
   };
 }
@@ -256,12 +252,12 @@ export async function findUsersByEmail(email) {
   return users.filter((u) => u.email === email);
 }
 
-export async function createUser({ id, email, salt, hash, role, active }) {
+export async function createUser({ id, email, hash, role, active }) {
   const db = initDb();
   if (db) {
     await db.query(
-      'INSERT INTO users (id, email, salt, hash, role, active) VALUES ($1, $2, $3, $4, $5, $6)',
-      [id, email, salt, hash, role, active]
+      'INSERT INTO users (id, email, hash, role, active) VALUES ($1, $2, $3, $4, $5)',
+      [id, email, hash, role, active]
     );
     return;
   }
@@ -269,7 +265,6 @@ export async function createUser({ id, email, salt, hash, role, active }) {
   users.push({
     id,
     email,
-    salt,
     hash,
     role,
     active,
@@ -315,4 +310,39 @@ export async function deleteUserById(id) {
 export async function countAdmins(excludeId) {
   const users = await listUsers();
   return users.filter((u) => u.role === 'admin' && u.id !== excludeId).length;
+}
+
+export async function recordFailedLogin(id) {
+  const db = initDb();
+  if (db) {
+    await db.query(
+      `UPDATE users SET failed_logins = failed_logins + 1,
+       locked_until = CASE WHEN failed_logins + 1 >= 5 THEN NOW() + INTERVAL '30 minutes' ELSE locked_until END
+       WHERE id = $1`,
+      [id]
+    );
+    return;
+  }
+  const users = await loadJsonUsers();
+  const user = users.find((u) => u.id === id);
+  if (!user) return;
+  user.failed_logins = (user.failed_logins || 0) + 1;
+  if (user.failed_logins >= 5) {
+    user.locked_until = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  }
+  await saveJsonUsers(users);
+}
+
+export async function resetFailedLogins(id) {
+  const db = initDb();
+  if (db) {
+    await db.query('UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = $1', [id]);
+    return;
+  }
+  const users = await loadJsonUsers();
+  const user = users.find((u) => u.id === id);
+  if (!user) return;
+  user.failed_logins = 0;
+  user.locked_until = null;
+  await saveJsonUsers(users);
 }

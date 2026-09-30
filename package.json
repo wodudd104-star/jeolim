@@ -11,8 +11,13 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
+    "bcrypt": "^6.0.0",
+    "cookie-parser": "^1.4.7",
+    "csrf-csrf": "^4.0.3",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
     "node-fetch": "^3.3.2",
     "nodemailer": "^6.9.16",
     "pg": "^8.13.1",

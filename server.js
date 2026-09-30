@@ -6,6 +6,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
 import fs from 'fs/promises';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import cookieParser from 'cookie-parser';
+import bcrypt from 'bcrypt';
 import {
   initDb,
   ensureUsersTable,
@@ -19,6 +23,8 @@ import {
   hashPassword,
   verifyPassword,
   commitDataFiles,
+  recordFailedLogin,
+  resetFailedLogins,
 } from './src/lib/db.js';
 
 config();
@@ -28,11 +34,106 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
+app.use(cookieParser());
+app.set('trust proxy', 1);
 
-const TARGET_ADMIN_ID = 'wodudd102';
-const DEFAULT_ADMIN_PASSWORD = '0000';
+// 보안 헤더
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://t1.daumcdn.net"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "blob:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false,
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true,
+  },
+}));
+
+// 글로벌 rate limiting
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(globalLimiter);
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip,
+  handler: (_req, res) => res.status(429).json({ error: '너무 많은 요청입니다. 잠시 후 다시 시도해주세요.' }),
+});
+
 const AUTH_FILE = path.join(__dirname, 'data', 'auth.json');
 const SIGNUP_LOG_FILE = path.join(__dirname, 'data', 'signups.json');
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24시간
+
+const sessions = new Map();
+
+function createSession(userId, role) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  sessions.set(token, { userId, role, expiresAt });
+  return { token, expiresAt };
+}
+
+function getSession(token) {
+  if (!token) return null;
+  const session = sessions.get(token);
+  if (!session) return null;
+  if (session.expiresAt < Date.now()) {
+    sessions.delete(token);
+    return null;
+  }
+  return session;
+}
+
+function requireAuth(req, res, next) {
+  const token = req.cookies?.session;
+  const session = getSession(token);
+  if (!session) {
+    return res.status(401).json({ error: '로그인이 필요합니다.' });
+  }
+  req.session = session;
+  next();
+}
+
+function requireAdmin(req, res, next) {
+  requireAuth(req, res, () => {
+    if (req.session.role !== 'admin') {
+      return res.status(403).json({ error: '관리자 권한이 필요합니다.' });
+    }
+    next();
+  });
+}
+
+function setSessionCookie(res, token, expiresAt) {
+  res.cookie('session', token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'strict',
+    maxAge: SESSION_TTL_MS,
+    expires: new Date(expiresAt),
+  });
+}
+
+function clearSessionCookie(res) {
+  res.clearCookie('session', { httpOnly: true, secure: true, sameSite: 'strict' });
+}
 
 async function appendSignupLog(user) {
   let list = [];
@@ -76,12 +177,13 @@ async function migrateJsonToDb() {
 
   for (const u of legacy) {
     if (existingIds.has(u.id)) continue;
-    if (!u.id || !u.salt || !u.hash) continue;
+    if (!u.id || !u.hash) continue;
     try {
+      // bcrypt 해시인지 확인
+      if (!u.hash.startsWith('$2')) continue;
       await createUser({
         id: u.id,
         email: u.email || '',
-        salt: u.salt,
         hash: u.hash,
         role: u.role === 'admin' ? 'admin' : 'user',
         active: u.active !== false,
@@ -97,38 +199,25 @@ async function migrateJsonToDb() {
   }
 }
 
-async function runAdminMigration() {
-  const user = await findUserById(TARGET_ADMIN_ID);
-  if (user) {
-    if (user.role !== 'admin' || !user.active) {
-      await updateUser(TARGET_ADMIN_ID, { role: 'admin', active: true });
-    }
-  }
-
-  // 기존 admin 계정이 다른 관리자가 있으면 삭제
-  const defaultAdmin = await findUserById('admin');
-  if (defaultAdmin) {
-    const otherAdmins = (await listUsers()).filter(
-      (u) => u.role === 'admin' && u.id !== 'admin'
-    );
-    if (otherAdmins.length > 0) {
-      await deleteUserById('admin');
-    }
-  }
-}
-
 async function ensureDefaultAdmin() {
   const admin = await findUserById('admin');
   if (admin) return;
-  const { salt, hash } = hashPassword(DEFAULT_ADMIN_PASSWORD);
+  const defaultPassword = process.env.DEFAULT_ADMIN_PASSWORD || crypto.randomBytes(8).toString('hex');
+  const hash = await hashPassword(defaultPassword);
   await createUser({
     id: 'admin',
     email: '',
-    salt,
     hash,
     role: 'admin',
     active: true,
   });
+  console.log(`[SECURITY] Default admin created with password: ${defaultPassword}`);
+  console.log('[SECURITY] Change this password immediately after first login.');
+}
+
+function isLocked(user) {
+  if (!user.locked_until) return false;
+  return new Date(user.locked_until).getTime() > Date.now();
 }
 
 function getEmailTransporter() {
@@ -139,29 +228,22 @@ function getEmailTransporter() {
   return nodemailer.createTransport({ service, auth: { user, pass } });
 }
 
-function generateCode(email) {
-  const secret = process.env.EMAIL_CODE_SECRET || 'jeolim-cabbage-secret';
-  const slot = Math.floor(Date.now() / (1000 * 60 * 30));
-  return crypto
-    .createHmac('sha256', secret)
-    .update(`${email}:${slot}`)
-    .digest('hex')
-    .slice(0, 6)
-    .toUpperCase();
+const resetCodes = new Map();
+
+function createResetCode(email) {
+  const code = crypto.randomInt(100000, 999999).toString();
+  resetCodes.set(email, { code, expiresAt: Date.now() + 30 * 60 * 1000 });
+  return code;
 }
 
-function verifyCode(email, code) {
-  const current = generateCode(email);
-  if (code.toUpperCase() === current) return true;
-  const secret = process.env.EMAIL_CODE_SECRET || 'jeolim-cabbage-secret';
-  const prevSlot = Math.floor(Date.now() / (1000 * 60 * 30)) - 1;
-  const prev = crypto
-    .createHmac('sha256', secret)
-    .update(`${email}:${prevSlot}`)
-    .digest('hex')
-    .slice(0, 6)
-    .toUpperCase();
-  return code.toUpperCase() === prev;
+function verifyResetCode(email, code) {
+  const record = resetCodes.get(email);
+  if (!record) return false;
+  if (record.expiresAt < Date.now()) {
+    resetCodes.delete(email);
+    return false;
+  }
+  return record.code === code;
 }
 
 async function sendEmail(to, subject, text) {
@@ -171,35 +253,85 @@ async function sendEmail(to, subject, text) {
   await transporter.sendMail({ from, to, subject, text });
 }
 
-app.post('/api/login', async (req, res) => {
-  const { id, password } = req.body;
-  if (!id || !password) {
-    return res.status(400).json({ error: '아이디와 비밀번호를 입력해주세요.' });
-  }
+// 유효성 검사
+function validateId(id) {
+  if (!id || typeof id !== 'string') return '아이디를 입력해주세요.';
+  if (id.length < 3 || id.length > 20) return '아이디는 3~20자 이내여야 합니다.';
+  if (!/^[a-zA-Z0-9_]+$/.test(id)) return '아이디는 영문, 숫자, 밑줄만 사용할 수 있습니다.';
+  return null;
+}
 
-  // 기본 관리자 계정은 항상 로그인 가능
-  if (id === 'admin' && password === DEFAULT_ADMIN_PASSWORD) {
-    return res.json({ id: 'admin', role: 'admin', active: true, email: '' });
+function validatePassword(password) {
+  if (!password || typeof password !== 'string') return '비밀번호를 입력해주세요.';
+  if (password.length < 8) return '비밀번호는 최소 8자 이상이어야 합니다.';
+  if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+    return '비밀번호는 영문과 숫자를 모두 포함해야 합니다.';
   }
+  return null;
+}
+
+function validateEmail(email) {
+  if (!email || typeof email !== 'string') return '이메일을 입력해주세요.';
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!re.test(email)) return '올바른 이메일 형식이 아닙니다.';
+  return null;
+}
+
+app.post('/api/login', authLimiter, async (req, res) => {
+  const { id, password } = req.body;
+  const idError = validateId(id);
+  if (idError) return res.status(400).json({ error: idError });
+  if (!password) return res.status(400).json({ error: '비밀번호를 입력해주세요.' });
 
   const user = await findUserById(id);
   if (!user) {
     return res.status(401).json({ error: '아이디 또는 비밀번호가 틀렸습니다.' });
   }
-  if (!verifyPassword(password, user.salt, user.hash)) {
+
+  if (isLocked(user)) {
+    return res.status(403).json({ error: '계정이 잠겼습니다. 30분 후 다시 시도해주세요.' });
+  }
+
+  const valid = await verifyPassword(password, user.hash);
+  if (!valid) {
+    await recordFailedLogin(id);
     return res.status(401).json({ error: '아이디 또는 비밀번호가 틀렸습니다.' });
   }
+
   if (!user.active) {
     return res.status(403).json({ error: '계정이 비활성화되었습니다. 관리자에게 문의하세요.' });
+  }
+
+  await resetFailedLogins(id);
+  const { token, expiresAt } = createSession(user.id, user.role);
+  setSessionCookie(res, token, expiresAt);
+  res.json({ id: user.id, role: user.role, active: user.active, email: user.email });
+});
+
+app.post('/api/logout', requireAuth, (_req, res) => {
+  const token = _req.cookies?.session;
+  if (token) sessions.delete(token);
+  clearSessionCookie(res);
+  res.json({ success: true });
+});
+
+app.get('/api/me', requireAuth, async (req, res) => {
+  const user = await findUserById(req.session.userId);
+  if (!user) {
+    clearSessionCookie(res);
+    return res.status(401).json({ error: '사용자를 찾을 수 없습니다.' });
   }
   res.json({ id: user.id, role: user.role, active: user.active, email: user.email });
 });
 
-app.post('/api/register', async (req, res) => {
+app.post('/api/register', authLimiter, async (req, res) => {
   const { id, password, email } = req.body;
-  if (!id || !password || !email) {
-    return res.status(400).json({ error: '아이디, 비밀번호, 이메일을 모두 입력해주세요.' });
-  }
+  const idError = validateId(id);
+  if (idError) return res.status(400).json({ error: idError });
+  const pwError = validatePassword(password);
+  if (pwError) return res.status(400).json({ error: pwError });
+  const emailError = validateEmail(email);
+  if (emailError) return res.status(400).json({ error: emailError });
 
   const existingById = await findUserById(id);
   if (existingById) {
@@ -210,11 +342,10 @@ app.post('/api/register', async (req, res) => {
     return res.status(409).json({ error: '이미 사용 중인 이메일입니다.' });
   }
 
-  const { salt, hash } = hashPassword(password);
+  const hash = await hashPassword(password);
   const newUser = {
     id,
     email,
-    salt,
     hash,
     role: 'user',
     active: false,
@@ -224,7 +355,7 @@ app.post('/api/register', async (req, res) => {
   res.json({ success: true, role: 'user', active: false });
 });
 
-app.get('/api/users', async (_req, res) => {
+app.get('/api/users', requireAdmin, async (_req, res) => {
   const users = await listUsers();
   res.json(
     users.map((u) => ({
@@ -237,11 +368,15 @@ app.get('/api/users', async (_req, res) => {
   );
 });
 
-app.post('/api/users', async (req, res) => {
+app.post('/api/users', requireAdmin, async (req, res) => {
   const { id, password, email, role, active } = req.body;
-  if (!id || !password || !email) {
-    return res.status(400).json({ error: '아이디, 비밀번호, 이메일을 모두 입력해주세요.' });
-  }
+  const idError = validateId(id);
+  if (idError) return res.status(400).json({ error: idError });
+  const pwError = validatePassword(password);
+  if (pwError) return res.status(400).json({ error: pwError });
+  const emailError = validateEmail(email);
+  if (emailError) return res.status(400).json({ error: emailError });
+
   const existingById = await findUserById(id);
   if (existingById) {
     return res.status(409).json({ error: '이미 사용 중인 아이디입니다.' });
@@ -250,11 +385,10 @@ app.post('/api/users', async (req, res) => {
   if (existingByEmail.length > 0) {
     return res.status(409).json({ error: '이미 사용 중인 이메일입니다.' });
   }
-  const { salt, hash } = hashPassword(password);
+  const hash = await hashPassword(password);
   await createUser({
     id,
     email,
-    salt,
     hash,
     role: role === 'admin' ? 'admin' : 'user',
     active: !!active,
@@ -262,41 +396,47 @@ app.post('/api/users', async (req, res) => {
   res.json({ success: true });
 });
 
-app.post('/api/users/:id/activate', async (req, res) => {
+app.post('/api/users/:id/activate', requireAdmin, async (req, res) => {
   const user = await findUserById(req.params.id);
   if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
-  await updateUser(req.params.id, { active: true });
+  await updateUser(req.params.id, { active: true, failed_logins: 0, locked_until: null });
   res.json({ success: true });
 });
 
-app.post('/api/users/:id/deactivate', async (req, res) => {
+app.post('/api/users/:id/deactivate', requireAdmin, async (req, res) => {
   const user = await findUserById(req.params.id);
   if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
   if (user.role === 'admin') {
     return res.status(403).json({ error: '관리자 계정은 비활성화할 수 없습니다.' });
   }
+  if (user.id === req.session.userId) {
+    return res.status(403).json({ error: '자신의 계정은 비활성화할 수 없습니다.' });
+  }
   await updateUser(req.params.id, { active: false });
   res.json({ success: true });
 });
 
-app.post('/api/users/:id/promote', async (req, res) => {
+app.post('/api/users/:id/promote', requireAdmin, async (req, res) => {
   const user = await findUserById(req.params.id);
   if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
   await updateUser(req.params.id, { role: 'admin', active: true });
   res.json({ success: true });
 });
 
-app.post('/api/users/:id/demote', async (req, res) => {
+app.post('/api/users/:id/demote', requireAdmin, async (req, res) => {
   const user = await findUserById(req.params.id);
   if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
   if (user.id === 'admin') {
     return res.status(403).json({ error: '기본 관리자 계정은 일반 사용자로 변경할 수 없습니다.' });
   }
+  if (user.id === req.session.userId) {
+    return res.status(403).json({ error: '자신의 계정은 일반 사용자로 변경할 수 없습니다.' });
+  }
   await updateUser(req.params.id, { role: 'user' });
   res.json({ success: true });
 });
 
-app.delete('/api/users/:id', async (req, res) => {
+app.delete('/api/users/:id', requireAdmin, async (req, res) => {
   const user = await findUserById(req.params.id);
   if (!user) return res.status(404).json({ error: '사용자를 찾을 수 없습니다.' });
   if (user.id === 'admin') {
@@ -307,12 +447,18 @@ app.delete('/api/users/:id', async (req, res) => {
       return res.status(403).json({ error: '다른 관리자가 없어 기본 관리자를 삭제할 수 없습니다.' });
     }
   }
+  if (user.id === req.session.userId) {
+    return res.status(403).json({ error: '자신의 계정은 삭제할 수 없습니다.' });
+  }
   await deleteUserById(req.params.id);
   res.json({ success: true });
 });
 
-app.post('/api/find-id', async (req, res) => {
+app.post('/api/find-id', authLimiter, async (req, res) => {
   const { email } = req.body;
+  const emailError = validateEmail(email);
+  if (emailError) return res.status(400).json({ error: emailError });
+
   const users = await findUsersByEmail(email);
   if (users.length === 0) {
     return res.status(404).json({ error: '등록된 이메일이 없습니다.' });
@@ -330,13 +476,16 @@ app.post('/api/find-id', async (req, res) => {
   }
 });
 
-app.post('/api/send-reset-code', async (req, res) => {
+app.post('/api/send-reset-code', authLimiter, async (req, res) => {
   const { email } = req.body;
+  const emailError = validateEmail(email);
+  if (emailError) return res.status(400).json({ error: emailError });
+
   const users = await findUsersByEmail(email);
   if (users.length === 0) {
     return res.status(404).json({ error: '등록된 이메일이 없습니다.' });
   }
-  const code = generateCode(email);
+  const code = createResetCode(email);
   try {
     await sendEmail(
       email,
@@ -349,61 +498,80 @@ app.post('/api/send-reset-code', async (req, res) => {
   }
 });
 
-app.post('/api/reset-password', async (req, res) => {
+app.post('/api/reset-password', authLimiter, async (req, res) => {
   const { email, code, newPassword } = req.body;
+  const emailError = validateEmail(email);
+  if (emailError) return res.status(400).json({ error: emailError });
+  const pwError = validatePassword(newPassword);
+  if (pwError) return res.status(400).json({ error: pwError });
+  if (!code) return res.status(400).json({ error: '인증번호를 입력해주세요.' });
+
   const users = await findUsersByEmail(email);
   if (users.length === 0) {
     return res.status(404).json({ error: '등록된 이메일이 없습니다.' });
   }
-  if (!verifyCode(email, code)) {
+  if (!verifyResetCode(email, code)) {
     return res.status(400).json({ error: '인증번호가 올바르지 않거나 만료되었습니다.' });
   }
-  const { salt, hash } = hashPassword(newPassword);
+  const hash = await hashPassword(newPassword);
   for (const user of users) {
-    await updateUser(user.id, { salt, hash });
+    await updateUser(user.id, { hash });
   }
+  resetCodes.delete(email);
   res.json({ success: true });
 });
 
-app.post('/api/update-auth', async (req, res) => {
-  const { currentId, currentPassword, newId, newPassword, email } = req.body;
+app.post('/api/update-auth', requireAuth, async (req, res) => {
+  const { currentPassword, newId, newPassword, email } = req.body;
+  const currentId = req.session.userId;
   const user = await findUserById(currentId);
   if (!user) {
     return res.status(400).json({ error: '서버에 등록된 계정이 없습니다.' });
   }
-  if (!verifyPassword(currentPassword, user.salt, user.hash)) {
-    return res.status(403).json({ error: '현재 아이디 또는 비밀번호가 틀렸습니다.' });
+  if (!currentPassword) {
+    return res.status(400).json({ error: '현재 비밀번호를 입력해주세요.' });
   }
+  const valid = await verifyPassword(currentPassword, user.hash);
+  if (!valid) {
+    return res.status(403).json({ error: '현재 비밀번호가 틀렸습니다.' });
+  }
+
+  const patch = {};
   if (newId && newId !== currentId) {
+    const idError = validateId(newId);
+    if (idError) return res.status(400).json({ error: idError });
     const conflict = await findUserById(newId);
     if (conflict) return res.status(409).json({ error: '이미 사용 중인 아이디입니다.' });
   }
   if (email && email !== user.email) {
+    const emailError = validateEmail(email);
+    if (emailError) return res.status(400).json({ error: emailError });
     const conflict = await findUsersByEmail(email);
     if (conflict.length > 0) return res.status(409).json({ error: '이미 사용 중인 이메일입니다.' });
   }
 
-  const patch = {};
   if (newId) patch.id = newId;
   if (email) patch.email = email;
   if (newPassword) {
-    const { salt, hash } = hashPassword(newPassword);
-    patch.salt = salt;
-    patch.hash = hash;
+    const pwError = validatePassword(newPassword);
+    if (pwError) return res.status(400).json({ error: pwError });
+    patch.hash = await hashPassword(newPassword);
   }
 
   // id 변경 시 삭제 후 재생성
   if (newId && newId !== currentId) {
-    const { salt, hash } = patch.hash ? { salt: patch.salt, hash: patch.hash } : { salt: user.salt, hash: user.hash };
     await createUser({
       id: newId,
       email: patch.email || user.email,
-      salt,
-      hash,
+      hash: patch.hash || user.hash,
       role: user.role,
       active: user.active,
     });
     await deleteUserById(currentId);
+    // 세션 갱신
+    const token = req.cookies?.session;
+    const session = sessions.get(token);
+    if (session) session.userId = newId;
     return res.json({ success: true, id: newId });
   }
 
@@ -421,7 +589,7 @@ function getAuthHeader(apiKey, apiSecret) {
   return `HMAC-SHA256 apiKey=${apiKey}, date=${date}, salt=${salt}, signature=${signature}`;
 }
 
-app.post('/api/send-sms', async (req, res) => {
+app.post('/api/send-sms', requireAuth, async (req, res) => {
   const { recipients, message } = req.body;
   const apiKey = process.env.SOLAPI_API_KEY;
   const apiSecret = process.env.SOLAPI_API_SECRET;
@@ -429,6 +597,10 @@ app.post('/api/send-sms', async (req, res) => {
 
   if (!apiKey || !apiSecret || !senderKey) {
     return res.status(500).json({ error: '서버 환경변수가 설정되지 않았습니다.' });
+  }
+
+  if (!Array.isArray(recipients) || recipients.length === 0) {
+    return res.status(400).json({ error: '수신자를 입력해주세요.' });
   }
 
   const validRecipients = recipients
@@ -484,7 +656,6 @@ const PORT = process.env.PORT || 3000;
     await ensureUsersTable();
     await migrateJsonToDb();
     await ensureDefaultAdmin();
-    await runAdminMigration();
     const users = await listUsers();
     console.log(`Total users in storage: ${users.length}`);
     console.log(`Users: ${users.map((u) => `${u.id}(${u.role})`).join(', ')}`);

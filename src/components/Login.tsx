@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { load, save } from '../lib/storage';
 import {
   findIdByEmail,
   login,
+  logout,
+  me,
   registerAccount,
   resetPassword,
   sendResetCode,
@@ -22,10 +24,15 @@ export function isLoggedIn() {
   return sessionStorage.getItem(AUTH_SESSION_KEY) === '1';
 }
 
-export function logout() {
+export async function performLogout() {
   sessionStorage.removeItem(AUTH_SESSION_KEY);
   sessionStorage.removeItem(AUTH_ROLE_KEY);
   sessionStorage.removeItem(AUTH_USER_KEY);
+  try {
+    await logout();
+  } catch {
+    // ignore
+  }
 }
 
 export function getStoredUser(): AuthUser | null {
@@ -38,6 +45,28 @@ export function setStoredUser(user: AuthUser) {
 
 export function isAdmin(): boolean {
   return sessionStorage.getItem(AUTH_ROLE_KEY) === 'admin';
+}
+
+function validateId(id: string) {
+  if (!id.trim()) return '아이디를 입력해주세요.';
+  if (id.length < 3 || id.length > 20) return '아이디는 3~20자 이내여야 합니다.';
+  if (!/^[a-zA-Z0-9_]+$/.test(id)) return '아이디는 영문, 숫자, 밑줄만 사용할 수 있습니다.';
+  return null;
+}
+
+function validatePassword(password: string) {
+  if (!password) return '비밀번호를 입력해주세요.';
+  if (password.length < 8) return '비밀번호는 최소 8자 이상이어야 합니다.';
+  if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+    return '비밀번호는 영문과 숫자를 모두 포함해야 합니다.';
+  }
+  return null;
+}
+
+function validateEmail(email: string) {
+  if (!email.trim()) return '이메일을 입력해주세요.';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return '올바른 이메일 형식이 아닙니다.';
+  return null;
 }
 
 type LoginMode = 'login' | 'signup' | 'find';
@@ -67,6 +96,18 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
+  useEffect(() => {
+    // 기존 세션 쿠키가 있으면 서버에 확인
+    me().then((user) => {
+      if (user) {
+        sessionStorage.setItem(AUTH_SESSION_KEY, '1');
+        sessionStorage.setItem(AUTH_ROLE_KEY, user.role === 'admin' ? 'admin' : 'user');
+        setStoredUser({ id: user.id, role: user.role, email: user.email });
+        onLogin();
+      }
+    }).catch(() => {});
+  }, [onLogin]);
+
   function resetMessages() {
     setError('');
     setSuccess('');
@@ -84,6 +125,15 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     resetMessages();
+    const idErr = validateId(id);
+    if (idErr) {
+      setError(idErr);
+      return;
+    }
+    if (!password) {
+      setError('비밀번호를 입력해주세요.');
+      return;
+    }
     try {
       const user = await login(id, password);
       sessionStorage.setItem(AUTH_SESSION_KEY, '1');
@@ -98,24 +148,27 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   async function handleSignup(e: React.FormEvent) {
     e.preventDefault();
     resetMessages();
-    if (!signupId.trim()) {
-      setError('아이디를 입력해주세요.');
+    const idErr = validateId(signupId);
+    if (idErr) {
+      setError(idErr);
       return;
     }
-    if (!signupPassword.trim()) {
-      setError('비밀번호를 입력해주세요.');
+    const pwErr = validatePassword(signupPassword);
+    if (pwErr) {
+      setError(pwErr);
       return;
     }
     if (signupPassword !== signupConfirm) {
       setError('비밀번호와 비밀번호 확인이 일치하지 않습니다.');
       return;
     }
-    if (!signupEmail.trim() || !signupEmail.includes('@')) {
-      setError('올바른 이메일을 입력해주세요.');
+    const emailErr = validateEmail(signupEmail);
+    if (emailErr) {
+      setError(emailErr);
       return;
     }
     try {
-      const data = await registerAccount(signupId, signupPassword, signupEmail);
+      await registerAccount(signupId, signupPassword, signupEmail);
       setSuccess('회원가입 신청이 완료되었습니다. 관리자 승인 후 로그인 가능합니다.');
       setMode('login');
       setId(signupId);
@@ -131,8 +184,9 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   async function handleSendCode(e?: React.FormEvent) {
     e?.preventDefault();
     resetMessages();
-    if (!findEmail.trim() || !findEmail.includes('@')) {
-      setError('올바른 이메일을 입력해주세요.');
+    const emailErr = validateEmail(findEmail);
+    if (emailErr) {
+      setError(emailErr);
       return;
     }
     setSending(true);
@@ -159,8 +213,9 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       setError('인증번호를 입력해주세요.');
       return;
     }
-    if (!newPassword.trim()) {
-      setError('새 비밀번호를 입력해주세요.');
+    const pwErr = validatePassword(newPassword);
+    if (pwErr) {
+      setError(pwErr);
       return;
     }
     if (newPassword !== newPasswordConfirm) {
@@ -224,6 +279,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
               value={id}
               onChange={(e) => setId(e.target.value)}
               autoFocus
+              autoComplete='username'
             />
             <input
               type='password'
@@ -231,6 +287,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
               placeholder='비밀번호'
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              autoComplete='current-password'
             />
             {error && <p className='login-error'>{error}</p>}
             {success && <p className='login-success'>{success}</p>}
@@ -245,17 +302,19 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
             <input
               type='text'
               className='input'
-              placeholder='아이디'
+              placeholder='아이디 (3~20자, 영문/숫자/밑줄)'
               value={signupId}
               onChange={(e) => setSignupId(e.target.value)}
               autoFocus
+              autoComplete='username'
             />
             <input
               type='password'
               className='input'
-              placeholder='비밀번호'
+              placeholder='비밀번호 (8자 이상, 영문+숫자)'
               value={signupPassword}
               onChange={(e) => setSignupPassword(e.target.value)}
+              autoComplete='new-password'
             />
             <input
               type='password'
@@ -263,6 +322,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
               placeholder='비밀번호 확인'
               value={signupConfirm}
               onChange={(e) => setSignupConfirm(e.target.value)}
+              autoComplete='new-password'
             />
             <input
               type='email'
@@ -270,6 +330,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
               placeholder='이메일 (아이디/비밀번호 찾기용)'
               value={signupEmail}
               onChange={(e) => setSignupEmail(e.target.value)}
+              autoComplete='email'
             />
             {error && <p className='login-error'>{error}</p>}
             {success && <p className='login-success'>{success}</p>}
@@ -309,6 +370,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
               value={findEmail}
               onChange={(e) => setFindEmail(e.target.value)}
               autoFocus
+              autoComplete='email'
             />
 
             {findType === 'id' && (
@@ -349,9 +411,10 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
                     <input
                       type='password'
                       className='input'
-                      placeholder='새 비밀번호'
+                      placeholder='새 비밀번호 (8자 이상, 영문+숫자)'
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
+                      autoComplete='new-password'
                     />
                     <input
                       type='password'
@@ -359,6 +422,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
                       placeholder='새 비밀번호 확인'
                       value={newPasswordConfirm}
                       onChange={(e) => setNewPasswordConfirm(e.target.value)}
+                      autoComplete='new-password'
                     />
                     <button
                       type='button'

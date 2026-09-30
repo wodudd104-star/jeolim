@@ -208,6 +208,10 @@ export default function Admin() {
       setMessage('새 비밀번호를 입력해주세요.');
       return;
     }
+    if (newPassword.length < 8 || !/[A-Za-z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+      setMessage('새 비밀번호는 8자 이상이며 영문과 숫자를 포함해야 합니다.');
+      return;
+    }
     if (newPassword !== confirmPassword) {
       setMessage('새 비밀번호와 확인이 일치하지 않습니다.');
       return;
@@ -218,8 +222,8 @@ export default function Admin() {
     }
 
     try {
-      await updateServerAuth(currentUser.id, currentPassword, newId, newPassword, email);
-      setStoredUser({ id: newId, role: currentUser.role, email });
+      const result = await updateServerAuth(currentPassword, newId, newPassword, email);
+      setStoredUser({ id: result.id || newId, role: currentUser.role, email });
       setCurrentPassword('');
       setNewId('');
       setNewPassword('');
@@ -268,6 +272,14 @@ export default function Admin() {
     setMessage('');
     if (!addForm.id.trim() || !addForm.password.trim() || !addForm.email.trim()) {
       setMessage('아이디, 비밀번호, 이메일을 모두 입력해주세요.');
+      return;
+    }
+    if (addForm.id.length < 3 || !/^[a-zA-Z0-9_]+$/.test(addForm.id)) {
+      setMessage('아이디는 3자 이상의 영문, 숫자, 밑줄만 사용할 수 있습니다.');
+      return;
+    }
+    if (addForm.password.length < 8 || !/[A-Za-z]/.test(addForm.password) || !/[0-9]/.test(addForm.password)) {
+      setMessage('비밀번호는 8자 이상이며 영문과 숫자를 포함해야 합니다.');
       return;
     }
     if (addForm.password !== addForm.confirm) {
