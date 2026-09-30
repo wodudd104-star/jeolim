@@ -1,0 +1,30 @@
+[
+  {
+    "id": "cksdudd102",
+    "email": "cksdudd102@naver.com",
+    "role": "user",
+    "active": false,
+    "loggedAt": "2026-09-09T13:31:59.519Z"
+  },
+  {
+    "id": "cksdudd102",
+    "email": "cksdudd102@naver.com",
+    "role": "user",
+    "active": false,
+    "loggedAt": "2026-09-09T13:37:11.192Z"
+  },
+  {
+    "id": "render_test_user",
+    "email": "render_test@example.com",
+    "role": "user",
+    "active": false,
+    "loggedAt": "2026-09-09T13:50:48.889Z"
+  },
+  {
+    "id": "cksdudd102",
+    "email": "cksdudd102@naver.com",
+    "role": "user",
+    "active": false,
+    "loggedAt": "2026-09-09T13:54:03.744Z"
+  }
+]

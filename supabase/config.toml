@@ -1,0 +1,4 @@
+project_id = "your-supabase-project-ref"
+
+[functions.send-sms]
+verify_jwt = true
