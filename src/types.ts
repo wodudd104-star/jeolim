@@ -30,7 +30,7 @@ export type Order = {
   deposit: boolean;
   courier?: string;
   trackingNumber?: string;
-  photos?: string[];
+  completionPhotos?: string[];
   reservationTime?: string;
   statusMemo?: string;
   shared?: boolean;

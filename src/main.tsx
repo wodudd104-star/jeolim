@@ -38,6 +38,20 @@ const COURIER_LIST = [
 const ORDERS_KEY = 'jc_orders_v3';
 const PRODUCTS_KEY = 'jc_products_v1';
 
+type StoredOrder = Order & { photos?: string[] };
+
+function loadOrders(): Order[] {
+  const stored = load<StoredOrder[]>(ORDERS_KEY, []);
+  return stored.map((order) => {
+    const legacyPhotos = Array.isArray(order.photos) ? order.photos : [];
+    const completionPhotos = Array.isArray(order.completionPhotos)
+      ? order.completionPhotos
+      : legacyPhotos;
+    const { photos: _legacyPhotos, ...rest } = order;
+    return completionPhotos.length > 0 ? { ...rest, completionPhotos } : rest;
+  });
+}
+
 declare global {
   interface Window {
     daum: any;
@@ -175,7 +189,7 @@ export default function App() {
   const postcodeWrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setOrders(load(ORDERS_KEY, []));
+    setOrders(loadOrders());
     setProducts(load(PRODUCTS_KEY, defaultProducts));
   }, []);
 
@@ -1276,7 +1290,7 @@ export default function App() {
                         <div className='order-photos'>
                           <div className='order-photos-head'>
                             <span className='order-photos-title'>
-                              📷 완료 사진 ({(order.photos || []).length}/{MAX_ORDER_PHOTOS})
+                              📷 주문별 완료 사진 ({(order.completionPhotos || []).length}/{MAX_ORDER_PHOTOS})
                             </span>
                             <div className='order-photos-actions'>
                               <button
@@ -1288,9 +1302,9 @@ export default function App() {
                               </button>
                             </div>
                           </div>
-                          {(order.photos || []).length > 0 && (
+                          {(order.completionPhotos || []).length > 0 && (
                             <div className='order-photo-list'>
-                              {(order.photos || []).map((photo, idx) => (
+                              {(order.completionPhotos || []).map((photo, idx) => (
                                 <div key={idx} className='order-photo-item'>
                                   <img src={photo} alt={`완료 사진 ${idx + 1}`} />
                                 </div>
@@ -1328,11 +1342,11 @@ export default function App() {
           maxPhotos={MAX_ORDER_PHOTOS}
           onClose={() => setPhotoModalOrderId(null)}
           onSave={async (photos) => {
-            updateOrderFields(photoModalOrder.id, { photos });
+            updateOrderFields(photoModalOrder.id, { completionPhotos: photos });
             setPhotoModalOrderId(null);
             if (photoModalOrder.shared) {
               try {
-                await syncPublicOrder({ ...photoModalOrder, photos });
+                await syncPublicOrder({ ...photoModalOrder, completionPhotos: photos });
               } catch {
                 // 자동 동기화에서 재시도됨
               }
@@ -1468,7 +1482,7 @@ function OrderPhotoModal({
   onClose: () => void;
   onSave: (photos: string[]) => void | Promise<void>;
 }) {
-  const [photos, setPhotos] = useState<string[]>(order.photos || []);
+  const [photos, setPhotos] = useState<string[]>(order.completionPhotos || []);
   const [saving, setSaving] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -1852,11 +1866,11 @@ function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?
             </div>
           </div>
 
-          {order.status === '완료' && (order.photos || []).length > 0 && (
+          {order.status === '완료' && (order.completionPhotos || []).length > 0 && (
             <div className='public-photos'>
               <h3 className='public-photos-title'>📷 완료 사진</h3>
               <div className='public-photos-grid'>
-                {(order.photos || []).map((photo, idx) => (
+                {(order.completionPhotos || []).map((photo, idx) => (
                   <img key={idx} src={photo} alt={`완료 사진 ${idx + 1}`} />
                 ))}
               </div>

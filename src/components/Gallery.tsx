@@ -206,7 +206,7 @@ export default function Gallery() {
       </header>
 
       <p className='panel-hint gallery-hint'>
-        사진은 선택사항이며 최대 {MAX_GALLERY_PHOTOS}장까지 등록할 수 있습니다. 각 사진 아래에
+        주문별 완료 사진과 분리된 공용 사진입니다. 사진은 선택사항이며 최대 {MAX_GALLERY_PHOTOS}장까지 등록할 수 있습니다. 각 사진 아래에
         설명이나 주의사항을 적을 수 있고, ◀ ▶ 버튼으로 순서를 변경할 수 있습니다. 등록이 끝나면
         맨 아래 [완료] 버튼을 눌러 URL을 생성하세요.
       </p>
