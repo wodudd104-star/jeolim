@@ -4,12 +4,13 @@ import * as XLSX from 'xlsx';
 import './style.css';
 import { sendSms } from './lib/api';
 import { load, save } from './lib/storage';
+import { compressImage } from './lib/images';
 import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page, Customer } from './types';
 import Login, { isAdmin, isLoggedIn, performLogout } from './components/Login';
 import Customers, { loadCustomers, updateCustomer } from './components/Customers';
 import Admin, { AccountManager, getStoredAccountNumber } from './components/Admin';
 import Dashboard from './components/Dashboard';
-import Gallery from './components/Gallery';
+import Gallery, { PublicGallery } from './components/Gallery';
 
 const STATUS_LIST: OrderStatus[] = ['접수', '준비중', '완료', '취소'];
 const PICKUP_LIST: PickupType[] = ['매장방문', '배송'];
@@ -365,6 +366,46 @@ export default function App() {
     }
   }
 
+  const MAX_ORDER_PHOTOS = 5;
+
+  async function handleOrderPhotoSelect(orderId: string, e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (files.length === 0) return;
+    const order = orders.find((o) => o.id === orderId);
+    if (!order) return;
+    const current = order.photos || [];
+    const remaining = MAX_ORDER_PHOTOS - current.length;
+    if (remaining <= 0) {
+      alert(`사진은 최대 ${MAX_ORDER_PHOTOS}장까지 등록할 수 있습니다.`);
+      return;
+    }
+    const targets = files.slice(0, remaining);
+    if (files.length > remaining) {
+      alert(`최대 ${MAX_ORDER_PHOTOS}장까지 가능하여 ${remaining}장만 추가됩니다.`);
+    }
+    try {
+      const compressed = await Promise.all(targets.map((f) => compressImage(f)));
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId ? { ...o, photos: [...(o.photos || []), ...compressed] } : o
+        )
+      );
+    } catch (err: any) {
+      alert(err.message || '이미지를 처리하는 중 오류가 발생했습니다.');
+    }
+  }
+
+  function removeOrderPhoto(orderId: string, index: number) {
+    setOrders((prev) =>
+      prev.map((o) =>
+        o.id === orderId
+          ? { ...o, photos: (o.photos || []).filter((_, i) => i !== index) }
+          : o
+      )
+    );
+  }
+
   function handlePrint(order: Order) {
     setPrintOrder(order);
     setTimeout(() => {
@@ -540,10 +581,15 @@ export default function App() {
 
   const params = new URLSearchParams(window.location.search);
   const publicOrderId = params.get('order');
+  const publicGallery = params.get('gallery');
   const publicOrder = publicOrderId ? orders.find((o) => o.id === publicOrderId) : undefined;
 
   if (publicOrderId) {
     return <PublicOrderView order={publicOrder} />;
+  }
+
+  if (publicGallery) {
+    return <PublicGallery />;
   }
 
   if (!loggedIn) {
@@ -1087,17 +1133,54 @@ export default function App() {
                             잔액: {formatCurrency(balance)}
                           </span>
                         </div>
-                        {order.memo && <p className='order-memo'>{order.memo}</p>}
+                      {order.memo && <p className='order-memo'>{order.memo}</p>}
                       </div>
+                      {order.status === '완료' && isAdmin() && (
+                        <div className='order-photos'>
+                          <div className='order-photos-head'>
+                            <span className='order-photos-title'>
+                              📷 완료 사진 ({(order.photos || []).length}/{MAX_ORDER_PHOTOS})
+                            </span>
+                            {(order.photos || []).length < MAX_ORDER_PHOTOS && (
+                              <label className='btn small order-photo-add'>
+                                사진 추가
+                                <input
+                                  type='file'
+                                  accept='image/*'
+                                  multiple
+                                  style={{ display: 'none' }}
+                                  onChange={(e) => handleOrderPhotoSelect(order.id, e)}
+                                />
+                              </label>
+                            )}
+                          </div>
+                          {(order.photos || []).length > 0 && (
+                            <div className='order-photo-list'>
+                              {(order.photos || []).map((photo, idx) => (
+                                <div key={idx} className='order-photo-item'>
+                                  <img src={photo} alt={`완료 사진 ${idx + 1}`} />
+                                  <button
+                                    type='button'
+                                    className='btn icon small danger order-photo-del'
+                                    onClick={() => removeOrderPhoto(order.id, idx)}
+                                    title='삭제'
+                                  >
+                                    ✕
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                       <div className='order-row foot'>
-                        <label className='deposit-label'>
-                          <input
-                            type='checkbox'
-                            checked={order.deposit}
-                            onChange={() => toggleDeposit(order.id)}
-                          />
-                          완납 처리
-                        </label>
+                        <button
+                          type='button'
+                          className={`btn deposit-toggle ${order.deposit ? 'paid' : ''}`}
+                          onClick={() => toggleDeposit(order.id)}
+                        >
+                          {order.deposit ? '✓ 완납 완료' : '완납 처리'}
+                        </button>
                         <span className='created'>접수일: {formatDate(order.createdAt)}</span>
                       </div>
                     </article>

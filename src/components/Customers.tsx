@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { Customer, Order } from '../types';
 import { load, save } from '../lib/storage';
-import { compressImage, saveSafely } from '../lib/images';
+import { saveSafely } from '../lib/images';
 import { isAdmin } from './Login';
 
 declare global {
@@ -72,14 +72,10 @@ export default function Customers({ orders }: { orders: Order[] }) {
     phone: '',
     address: '',
     memo: '',
-    photos: [],
     arrivalDate: '',
     quantity: undefined,
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const photoInputRef = useRef<HTMLInputElement>(null);
-
-  const MAX_CUSTOMER_PHOTOS = 5;
 
   const admin = isAdmin();
 
@@ -108,9 +104,8 @@ export default function Customers({ orders }: { orders: Order[] }) {
   }, [orders]);
 
   function resetForm() {
-    setForm({ name: '', phone: '', address: '', memo: '', photos: [], arrivalDate: '', quantity: undefined });
+    setForm({ name: '', phone: '', address: '', memo: '', arrivalDate: '', quantity: undefined });
     setEditingId(null);
-    if (photoInputRef.current) photoInputRef.current.value = '';
   }
 
   function openNewForm() {
@@ -124,12 +119,15 @@ export default function Customers({ orders }: { orders: Order[] }) {
       phone: customer.phone,
       address: customer.address,
       memo: customer.memo,
-      photos: customer.photos || [],
       arrivalDate: customer.arrivalDate || '',
       quantity: customer.quantity,
     });
     setEditingId(customer.id);
-    setIsFormOpen(true);
+    setIsFormOpen(false);
+  }
+
+  function cancelEdit() {
+    resetForm();
   }
 
   function commitCustomers(next: Customer[]) {
@@ -137,47 +135,6 @@ export default function Customers({ orders }: { orders: Order[] }) {
     if (!saveSafely((v) => saveCustomers(v as Customer[]), next)) {
       setCustomers(customers);
     }
-  }
-
-  async function handlePhotoSelect(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files || []);
-    if (files.length === 0) return;
-    const current = form.photos || [];
-    const remaining = MAX_CUSTOMER_PHOTOS - current.length;
-    if (remaining <= 0) {
-      alert(`사진은 최대 ${MAX_CUSTOMER_PHOTOS}장까지 등록할 수 있습니다.`);
-      if (photoInputRef.current) photoInputRef.current.value = '';
-      return;
-    }
-    const targets = files.slice(0, remaining);
-    if (files.length > remaining) {
-      alert(`최대 ${MAX_CUSTOMER_PHOTOS}장까지 가능하여 ${remaining}장만 추가됩니다.`);
-    }
-    try {
-      const compressed = await Promise.all(targets.map((f) => compressImage(f)));
-      setForm((prev) => ({ ...prev, photos: [...(prev.photos || []), ...compressed] }));
-    } catch (err: any) {
-      alert(err.message || '이미지를 처리하는 중 오류가 발생했습니다.');
-    } finally {
-      if (photoInputRef.current) photoInputRef.current.value = '';
-    }
-  }
-
-  function removePhoto(index: number) {
-    setForm((prev) => ({
-      ...prev,
-      photos: (prev.photos || []).filter((_, i) => i !== index),
-    }));
-  }
-
-  function movePhoto(index: number, direction: -1 | 1) {
-    setForm((prev) => {
-      const photos = [...(prev.photos || [])];
-      const target = index + direction;
-      if (target < 0 || target >= photos.length) return prev;
-      [photos[index], photos[target]] = [photos[target], photos[index]];
-      return { ...prev, photos };
-    });
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -430,9 +387,9 @@ export default function Customers({ orders }: { orders: Order[] }) {
         )}
       </section>
 
-      {admin && isFormOpen && (
+      {admin && isFormOpen && !editingId && (
         <section className='panel form-panel'>
-          <h2>{editingId ? '고객 수정' : '새 고객 등록'}</h2>
+          <h2>새 고객 등록</h2>
           <form onSubmit={handleSubmit}>
             <div className='form-grid'>
               <label>
@@ -512,66 +469,6 @@ export default function Customers({ orders }: { orders: Order[] }) {
                   placeholder='특이사항'
                 />
               </label>
-              <div className='full photo-field'>
-                <span className='photo-field-label'>
-                  사진 (선택, 최대 {MAX_CUSTOMER_PHOTOS}장)
-                </span>
-                <div className='photo-grid'>
-                  {(form.photos || []).map((photo, idx) => (
-                    <div key={idx} className='photo-item'>
-                      <img src={photo} alt={`고객 사진 ${idx + 1}`} />
-                      <div className='photo-item-actions'>
-                        <button
-                          type='button'
-                          className='btn icon small'
-                          onClick={() => movePhoto(idx, -1)}
-                          disabled={idx === 0}
-                          title='앞으로'
-                        >
-                          ◀
-                        </button>
-                        <button
-                          type='button'
-                          className='btn icon small'
-                          onClick={() => movePhoto(idx, 1)}
-                          disabled={idx === (form.photos || []).length - 1}
-                          title='뒤로'
-                        >
-                          ▶
-                        </button>
-                        <button
-                          type='button'
-                          className='btn icon small danger'
-                          onClick={() => removePhoto(idx)}
-                          title='삭제'
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                  {(form.photos || []).length < MAX_CUSTOMER_PHOTOS && (
-                    <button
-                      type='button'
-                      className='photo-add'
-                      onClick={() => photoInputRef.current?.click()}
-                    >
-                      📷 사진 추가
-                      <span className='photo-add-count'>
-                        {(form.photos || []).length}/{MAX_CUSTOMER_PHOTOS}
-                      </span>
-                    </button>
-                  )}
-                </div>
-                <input
-                  ref={photoInputRef}
-                  type='file'
-                  accept='image/*'
-                  multiple
-                  style={{ display: 'none' }}
-                  onChange={handlePhotoSelect}
-                />
-              </div>
             </div>
             <div className='form-actions'>
               <button
@@ -582,7 +479,7 @@ export default function Customers({ orders }: { orders: Order[] }) {
                 취소
               </button>
               <button type='submit' className='btn btn-primary'>
-                {editingId ? '수정 저장' : '고객 등록'}
+                고객 등록
               </button>
             </div>
           </form>
@@ -613,67 +510,151 @@ export default function Customers({ orders }: { orders: Order[] }) {
           filtered.map((customer) => {
             const phoneDigits = customer.phone.replace(/\D/g, '');
             const orderCount = orderCounts.get(phoneDigits) || 0;
+            const isEditing = editingId === customer.id;
             return (
               <article
                 key={customer.id}
-                className={`customer-card${selectedIds.has(customer.id) ? ' selected' : ''}`}
+                className={`customer-card${selectedIds.has(customer.id) ? ' selected' : ''}${isEditing ? ' editing' : ''}`}
               >
-                <div className='customer-row head'>
-                  {admin && (
-                    <input
-                      type='checkbox'
-                      className='customer-check'
-                      checked={selectedIds.has(customer.id)}
-                      onChange={() => toggleSelect(customer.id)}
-                      aria-label={`${customer.name || customer.phone || '고객'} 선택`}
-                    />
-                  )}
-                  <div className='customer-meta'>
-                    <span className='customer-name'>{customer.name}</span>
-                    <span className='customer-phone'>
-                      {customer.phone || '연락처 없음'}
-                    </span>
-                    {orderCount > 0 && (
-                      <span className='tag highlight'>{orderCount}건 주문</span>
-                    )}
-                    {customer.arrivalDate && (
-                      <span className='tag'>도착 {customer.arrivalDate}</span>
-                    )}
-                    {(customer.quantity ?? 0) > 0 && (
-                      <span className='tag highlight'>{customer.quantity}개</span>
-                    )}
-                  </div>
-                  {admin && (
-                    <div className='customer-actions'>
-                      <button
-                        className='btn icon'
-                        onClick={() => startEdit(customer)}
-                        title='수정'
-                      >
-                        ✎
+                {admin && isEditing ? (
+                  <form onSubmit={handleSubmit} className='customer-inline-form'>
+                    <div className='form-grid'>
+                      <label>
+                        고객명 (선택)
+                        <input
+                          className='input'
+                          value={form.name}
+                          onChange={(e) => setForm({ ...form, name: e.target.value })}
+                          placeholder='미입력 가능'
+                        />
+                      </label>
+                      <label>
+                        연락처
+                        <input
+                          className='input'
+                          type='tel'
+                          value={form.phone}
+                          onChange={(e) =>
+                            setForm({ ...form, phone: formatPhone(e.target.value) })
+                          }
+                          placeholder='010-0000-0000'
+                          maxLength={13}
+                        />
+                      </label>
+                      <label>
+                        도착 예정일 (선택)
+                        <input
+                          className='input'
+                          type='date'
+                          value={form.arrivalDate || ''}
+                          onChange={(e) => setForm({ ...form, arrivalDate: e.target.value })}
+                        />
+                      </label>
+                      <label>
+                        수량 (선택)
+                        <input
+                          className='input'
+                          type='number'
+                          min={0}
+                          value={form.quantity ?? ''}
+                          onChange={(e) =>
+                            setForm({
+                              ...form,
+                              quantity:
+                                e.target.value === ''
+                                  ? undefined
+                                  : Math.max(0, Number(e.target.value)),
+                            })
+                          }
+                          placeholder='주문 수량'
+                        />
+                      </label>
+                      <label className='full'>
+                        주소
+                        <div className='address-row'>
+                          <input
+                            className='input'
+                            value={form.address}
+                            onChange={(e) => setForm({ ...form, address: e.target.value })}
+                            placeholder='배송 주소'
+                          />
+                          <button type='button' className='btn' onClick={openPostcode}>
+                            🔍 주소 검색
+                          </button>
+                        </div>
+                      </label>
+                      <label className='full'>
+                        메모
+                        <input
+                          className='input'
+                          value={form.memo}
+                          onChange={(e) => setForm({ ...form, memo: e.target.value })}
+                          placeholder='특이사항'
+                        />
+                      </label>
+                    </div>
+                    <div className='form-actions'>
+                      <button type='button' className='btn' onClick={cancelEdit}>
+                        취소
                       </button>
-                      <button
-                        className='btn icon danger'
-                        onClick={() => removeCustomer(customer.id)}
-                        title='삭제'
-                      >
-                        ✕
+                      <button type='submit' className='btn btn-primary'>
+                        수정 저장
                       </button>
                     </div>
-                  )}
-                </div>
-                {customer.address && (
-                  <p className='customer-address'>{customer.address}</p>
-                )}
-                {customer.memo && (
-                  <p className='customer-memo'>{customer.memo}</p>
-                )}
-                {customer.photos && customer.photos.length > 0 && (
-                  <div className='customer-photos'>
-                    {customer.photos.map((photo, idx) => (
-                      <img key={idx} src={photo} alt={`고객 사진 ${idx + 1}`} />
-                    ))}
-                  </div>
+                  </form>
+                ) : (
+                  <>
+                    <div className='customer-row head'>
+                      {admin && (
+                        <input
+                          type='checkbox'
+                          className='customer-check'
+                          checked={selectedIds.has(customer.id)}
+                          onChange={() => toggleSelect(customer.id)}
+                          aria-label={`${customer.name || customer.phone || '고객'} 선택`}
+                        />
+                      )}
+                      <div className='customer-meta'>
+                        <span className='customer-name'>{customer.name}</span>
+                        <span className='customer-phone'>
+                          {customer.phone || '연락처 없음'}
+                        </span>
+                        {orderCount > 0 && (
+                          <span className='tag highlight'>{orderCount}건 주문</span>
+                        )}
+                        {customer.arrivalDate && (
+                          <span className='tag'>도착 {customer.arrivalDate}</span>
+                        )}
+                        {(customer.quantity ?? 0) > 0 && (
+                          <span className='tag highlight'>{customer.quantity}개</span>
+                        )}
+                      </div>
+                      {admin && (
+                        <div className='customer-actions'>
+                          <button
+                            className='btn icon'
+                            onClick={() => startEdit(customer)}
+                            title='수정'
+                          >
+                            ✎
+                          </button>
+                          <button
+                            className='btn icon danger'
+                            onClick={() => removeCustomer(customer.id)}
+                            title='삭제'
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    {customer.address && (
+                      <p className='customer-address'>{customer.address}</p>
+                    )}
+                    {customer.memo && (
+                      <p className='customer-memo'>{customer.memo}</p>
+                    )}
+                  </>
                 )}
               </article>
             );

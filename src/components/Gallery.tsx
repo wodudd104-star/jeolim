@@ -6,6 +6,12 @@ import { compressImage, saveSafely } from '../lib/images';
 const GALLERY_KEY = 'jc_gallery_v1';
 const MAX_GALLERY_PHOTOS = 10;
 
+export function getGalleryPublicUrl() {
+  const url = new URL(window.location.href);
+  url.search = '?gallery=view';
+  return url.toString();
+}
+
 export function loadGallery(): GalleryItem[] {
   return load(GALLERY_KEY, []);
 }
@@ -14,9 +20,50 @@ export function saveGallery(items: GalleryItem[]) {
   save(GALLERY_KEY, items);
 }
 
+export function PublicGallery() {
+  const [items] = useState<GalleryItem[]>(() => loadGallery());
+  return (
+    <div className='app-shell'>
+      <div className='container'>
+        <div className='panel public-order'>
+          <header className='public-order-header'>
+            <h2>절임배추 사진</h2>
+          </header>
+          {items.length === 0 ? (
+            <p className='empty'>등록된 사진이 없습니다.</p>
+          ) : (
+            <div className='gallery-grid public'>
+              {items.map((item, idx) => (
+                <div key={item.id} className='gallery-card'>
+                  <span className='gallery-index'>{idx + 1}번</span>
+                  <img className='gallery-image' src={item.image} alt={`사진 ${idx + 1}`} />
+                  {item.note && <p className='gallery-public-note'>{item.note}</p>}
+                </div>
+              ))}
+            </div>
+          )}
+          <p className='public-order-thanks'>이용해주셔서 감사합니다.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Gallery() {
   const [items, setItems] = useState<GalleryItem[]>(() => loadGallery());
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function copyGalleryUrl() {
+    const url = getGalleryPublicUrl();
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      prompt('아래 URL을 복사해주세요.', url);
+    }
+  }
 
   function commitItems(next: GalleryItem[]) {
     setItems(next);
@@ -78,6 +125,11 @@ export default function Gallery() {
           <h1>사진 등록</h1>
         </div>
         <div className='header-actions'>
+          {items.length > 0 && (
+            <button className='btn' onClick={copyGalleryUrl}>
+              {copied ? '✓ URL 복사됨' : '🔗 URL 복사'}
+            </button>
+          )}
           {items.length < MAX_GALLERY_PHOTOS && (
             <button className='btn btn-primary' onClick={() => fileInputRef.current?.click()}>
               📷 사진 추가 ({items.length}/{MAX_GALLERY_PHOTOS})

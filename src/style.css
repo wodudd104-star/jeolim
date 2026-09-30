@@ -443,6 +443,74 @@ h1 {
   font-weight: 600;
 }
 
+.deposit-toggle {
+  font-weight: 700;
+}
+
+.deposit-toggle.paid {
+  background: #dcfce7;
+  color: #166534;
+  border-color: #86efac;
+}
+
+.order-photos {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e5e7eb;
+}
+
+.order-photos-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.order-photos-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #374151;
+}
+
+.order-photo-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.order-photo-item {
+  position: relative;
+}
+
+.order-photo-item img {
+  width: 84px;
+  height: 84px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+  display: block;
+}
+
+.order-photo-del {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  background: #fff;
+}
+
+.customer-card.editing {
+  border-color: #16a34a;
+  box-shadow: 0 4px 16px rgb(22 163 74 / 12%);
+}
+
+.gallery-public-note {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #4b5563;
+  white-space: pre-wrap;
+}
+
 .panel {
   border: 1px solid #e5e7eb;
   border-radius: var(--radius);

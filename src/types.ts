@@ -30,6 +30,7 @@ export type Order = {
   deposit: boolean;
   courier?: string;
   trackingNumber?: string;
+  photos?: string[];
 };
 
 export type Customer = {
@@ -39,7 +40,6 @@ export type Customer = {
   phone: string;
   address: string;
   memo: string;
-  photos?: string[];
   arrivalDate?: string;
   quantity?: number;
 };
