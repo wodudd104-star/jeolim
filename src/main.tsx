@@ -40,8 +40,7 @@ const PRODUCTS_KEY = 'jc_products_v1';
 
 type StoredOrder = Order & { photos?: string[] };
 
-function loadOrders(): Order[] {
-  const stored = load<StoredOrder[]>(ORDERS_KEY, []);
+function normalizeOrders(stored: StoredOrder[]): Order[] {
   return stored.map((order) => {
     const legacyPhotos = Array.isArray(order.photos) ? order.photos : [];
     const completionPhotos = Array.isArray(order.completionPhotos)
@@ -50,6 +49,10 @@ function loadOrders(): Order[] {
     const { photos: _legacyPhotos, ...rest } = order;
     return completionPhotos.length > 0 ? { ...rest, completionPhotos } : rest;
   });
+}
+
+function loadOrders(): Order[] {
+  return normalizeOrders(load<StoredOrder[]>(ORDERS_KEY, []));
 }
 
 declare global {
@@ -232,7 +235,9 @@ export default function App() {
               localRaw === '{}';
             if (localEmpty) {
               save(lsKey, serverValue);
-              if (key === 'orders') setOrders(serverValue);
+              if (key === 'orders' && Array.isArray(serverValue)) {
+                setOrders(normalizeOrders(serverValue));
+              }
               if (key === 'products') setProducts(serverValue);
             }
           }
