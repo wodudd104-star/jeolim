@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { supabase, auth } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
 
 const AUTH_SESSION_KEY = 'jc_auth_session';
 const AUTH_ROLE_KEY = 'jc_auth_role';
@@ -40,6 +40,11 @@ export function isAdmin(): boolean {
 }
 
 export default function Login({ onLogin }: { onLogin: () => void }) {
+  const [mode, setMode] = useState<'login' | 'signup'>('login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -76,28 +81,120 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
     };
   }, [onLogin]);
 
-  function handleSignIn() {
+  async function handleLogin(e: React.FormEvent) {
+    e.preventDefault();
     setError('');
-    try {
-      auth.openSignInModal();
-    } catch (err: any) {
-      setError(err?.message || '로그인 창을 열 수 없습니다.');
+    setLoading(true);
+    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+    setLoading(false);
+    if (err) {
+      setError(err.message || '로그인에 실패했습니다.');
     }
+  }
+
+  async function handleSignup(e: React.FormEvent) {
+    e.preventDefault();
+    setError('');
+    if (!email.trim() || !email.includes('@')) {
+      setError('올바른 이메일을 입력해주세요.');
+      return;
+    }
+    if (password.length < 6) {
+      setError('비밀번호는 최소 6자 이상이어야 합니다.');
+      return;
+    }
+    if (password !== confirm) {
+      setError('비밀번호와 비밀번호 확인이 일치하지 않습니다.');
+      return;
+    }
+    setLoading(true);
+    const { error: err } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { role: 'user', active: false },
+      },
+    });
+    setLoading(false);
+    if (err) {
+      setError(err.message || '회원가입에 실패했습니다.');
+      return;
+    }
+    alert('회원가입이 완료되었습니다. 관리자 승인 후 로그인할 수 있습니다.');
+    setMode('login');
   }
 
   return (
     <div className='login-overlay'>
       <div className='login-box panel'>
         <h1>절임배추 관리</h1>
-        <p>관리자 로그인</p>
+        <p>{mode === 'login' ? '로그인' : '회원가입'}</p>
 
-        <button type='button' className='btn btn-primary full' onClick={handleSignIn}>
-          Verdent로 로그인 / 회원가입
-        </button>
+        <form onSubmit={mode === 'login' ? handleLogin : handleSignup}>
+          <label className='full'>
+            이메일
+            <input
+              type='email'
+              className='input full'
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder='이메일'
+              required
+            />
+          </label>
 
-        {error && <p className='login-error'>{error}</p>}
+          <label className='full'>
+            비밀번호
+            <input
+              type='password'
+              className='input full'
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder='비밀번호'
+              required
+              minLength={6}
+            />
+          </label>
 
-        <p className='login-hint'>Google 또는 이메일로 안전하게 로그인합니다.</p>
+          {mode === 'signup' && (
+            <label className='full'>
+              비밀번호 확인
+              <input
+                type='password'
+                className='input full'
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                placeholder='비밀번호 확인'
+                required
+                minLength={6}
+              />
+            </label>
+          )}
+
+          {error && <p className='login-error'>{error}</p>}
+
+          <button type='submit' className='btn btn-primary full' disabled={loading}>
+            {loading ? '처리 중...' : mode === 'login' ? '로그인' : '회원가입'}
+          </button>
+        </form>
+
+        <div className='login-toggle'>
+          {mode === 'login' ? (
+            <>
+              아직 계정이 없으신가요?{' '}
+              <button type='button' className='link' onClick={() => setMode('signup')}>
+                회원가입
+              </button>
+            </>
+          ) : (
+            <>
+              이미 계정이 있으신가요?{' '}
+              <button type='button' className='link' onClick={() => setMode('login')}>
+                로그인
+              </button>
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
