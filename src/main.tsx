@@ -44,6 +44,54 @@ function formatPhone(value: string) {
   return `${digits.slice(0, 3)}-${digits.slice(3, 7)}-${digits.slice(7, 11)}`;
 }
 
+function parsePhone(value: string): string {
+  const digits = String(value).replace(/\D/g, '');
+  if (digits.length <= 3) return digits;
+  if (digits.length <= 7) return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+  return `${digits.slice(0, 3)}-${digits.slice(3, 7)}-${digits.slice(7, 11)}`;
+}
+
+function parseKoreanDate(value: string): string {
+  if (!value) return '';
+  const text = String(value).trim();
+  const match = text.match(/(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일/);
+  if (match) {
+    return `${match[1]}-${String(match[2]).padStart(2, '0')}-${String(match[3]).padStart(2, '0')}`;
+  }
+  // 이미 ISO 또는 yyyy-mm-dd 형식이면 그대로
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  return '';
+}
+
+function getCell(row: Record<string, any>, keys: string[]): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (value !== undefined && value !== null && value !== '') {
+      return String(value).trim();
+    }
+  }
+  return '';
+}
+
+function normalizePickup(value: string): PickupType {
+  const text = String(value).trim();
+  if (text.includes('배달') || text.includes('택배') || text.includes('배송')) return '배송';
+  return '매장방문';
+}
+
+function normalizeStatus(value: string): OrderStatus {
+  const text = String(value).trim();
+  if (text.includes('완료')) return '완료';
+  if (text.includes('준비')) return '준비중';
+  if (text.includes('취소')) return '취소';
+  return '접수';
+}
+
+function isDoneStatus(value: string): boolean {
+  const text = String(value).trim();
+  return text.includes('완료') || text.includes('완납') || text.includes('Y');
+}
+
 function getOrderPublicUrl(orderId: string) {
   const url = new URL(window.location.href);
   url.search = `?order=${orderId}`;
@@ -92,6 +140,7 @@ export default function App() {
   const [isPostcodeOpen, setIsPostcodeOpen] = useState(false);
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
   const [accountNumber, setAccountNumber] = useState(() => getStoredAccountNumber());
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const postcodeWrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -168,8 +217,8 @@ export default function App() {
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.name.trim()) {
-      alert('고객명을 입력해주세요.');
+    if (!form.phone.trim()) {
+      alert('연락처를 입력해주세요.');
       return;
     }
     if (!form.cabbageType.trim()) {
@@ -276,6 +325,91 @@ export default function App() {
     await performLogout();
     setLoggedIn(false);
     setPage('orders');
+  }
+
+  function importOrdersFromExcel(rows: Record<string, any>[]) {
+    const imported: Order[] = [];
+    const skipped: string[] = [];
+
+    for (const row of rows) {
+      const dateText = getCell(row, ['날짜', '도착', '날짜(도착)', '수령일', '희망일', 'date']);
+      const address = getCell(row, ['주소', '배송주소', 'address']);
+      const name = getCell(row, ['이름', '고객명', '성함', 'name']);
+      const phoneRaw = getCell(row, ['연락처', '전화번호', '휴폰', 'phone']);
+      const quantityRaw = getCell(row, ['개수', '수량', '수량(개)', 'quantity']);
+      const timeText = getCell(row, ['시간', '수령시간', 'time']);
+      const pickupText = getCell(row, ['택/배', '수령방식', '배송', 'pickup']);
+      const memo = getCell(row, ['요청사항', '메모', '특이사항', 'memo']);
+      const doneText = getCell(row, ['완/미완', '완료여부', '상태', 'status', '입금상태']);
+
+      const phone = parsePhone(phoneRaw);
+      if (!phone) {
+        skipped.push(`전화번호 누락: ${name || '(이름없음)'}`);
+        continue;
+      }
+
+      const quantity = Number(quantityRaw) || 1;
+      const pickup = normalizePickup(pickupText);
+      const status = normalizeStatus(doneText);
+      const pickupDate = parseKoreanDate(dateText);
+      const deposit = isDoneStatus(doneText);
+
+      const product = products[0] || defaultProducts[0];
+      const pricePerUnit = product.price;
+      const totalPrice = calcTotal(quantity, pricePerUnit);
+
+      imported.push({
+        id: crypto.randomUUID(),
+        createdAt: new Date().toISOString(),
+        name: name || '',
+        phone,
+        productId: product.id,
+        cabbageType: product.name,
+        quantity,
+        unit: product.unit,
+        pricePerUnit,
+        totalPrice,
+        depositAmount: deposit ? totalPrice : 0,
+        pickup,
+        pickupDate,
+        preparationDate: '',
+        address,
+        memo: memo || timeText || '',
+        status,
+        deposit,
+      });
+    }
+
+    if (imported.length > 0) {
+      setOrders((prev) => [...imported, ...prev]);
+    }
+
+    return { imported: imported.length, skipped };
+  }
+
+  async function handleExcelImport(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const data = new Uint8Array(event.target?.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json(sheet) as Record<string, any>[];
+        const result = importOrdersFromExcel(rows);
+        if (result.skipped.length > 0) {
+          console.warn('Skipped rows:', result.skipped);
+        }
+        alert(`${result.imported}건의 주문을 등록했습니다.${result.skipped.length > 0 ? '\n누락: ' + result.skipped.length + '건' : ''}`);
+      } catch (err: any) {
+        alert(err.message || '엑셀 파일을 읽는 중 오류가 발생했습니다.');
+      } finally {
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+    };
+    reader.readAsArrayBuffer(file);
   }
 
   function loadPostcodeScript(): Promise<typeof window.daum> {
@@ -496,8 +630,18 @@ export default function App() {
                 ))}
               </select>
               <button className='btn' onClick={exportExcel}>
-                📥 엑셀
+                📥 엑셀 저장
               </button>
+              <button className='btn' onClick={() => fileInputRef.current?.click()}>
+                📤 엑셀 등록
+              </button>
+              <input
+                ref={fileInputRef}
+                type='file'
+                accept='.xlsx,.xls,.csv'
+                style={{ display: 'none' }}
+                onChange={handleExcelImport}
+              />
             </section>
 
             {isFormOpen && (
@@ -506,12 +650,12 @@ export default function App() {
                 <form onSubmit={handleSubmit}>
                   <div className='form-grid'>
                     <label>
-                      고객명
+                      고객명 (선택)
                       <input
                         className='input'
                         value={form.name}
                         onChange={(e) => setForm({ ...form, name: e.target.value })}
-                        placeholder='홍길동'
+                        placeholder='미입력 가능'
                       />
                     </label>
                     <label>

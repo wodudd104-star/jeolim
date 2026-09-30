@@ -104,8 +104,8 @@ export default function Customers({ orders }: { orders: Order[] }) {
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.name.trim()) {
-      alert('고객명을 입력해주세요.');
+    if (!form.phone.trim()) {
+      alert('연락처를 입력해주세요.');
       return;
     }
     if (editingId) {
@@ -167,7 +167,7 @@ export default function Customers({ orders }: { orders: Order[] }) {
           .map((c) => ({
             id: crypto.randomUUID(),
             createdAt: new Date().toISOString(),
-            name: c.name,
+            name: c.name || '',
             phone: formatPhone(c.phone),
             address: c.address,
             memo: c.memo,
@@ -280,12 +280,12 @@ export default function Customers({ orders }: { orders: Order[] }) {
           <form onSubmit={handleSubmit}>
             <div className='form-grid'>
               <label>
-                고객명
+                고객명 (선택)
                 <input
                   className='input'
                   value={form.name}
                   onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  placeholder='홍길동'
+                  placeholder='미입력 가능'
                 />
               </label>
               <label>
