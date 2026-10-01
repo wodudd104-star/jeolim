@@ -539,12 +539,28 @@ export default function App() {
   const MAX_ORDER_PHOTOS = 5;
 
   function handlePrint(order: Order) {
+    // 새 창에 영수증을 띄워 인쇄 (모바일/웹뷰에서도 동작)
+    const w = window.open('', '_blank', 'width=420,height=680');
+    if (w) {
+      w.document.write(buildReceiptHtml(order));
+      w.document.close();
+      return;
+    }
+    // 팝업이 차단된 경우 현재 화면에서 인쇄
     setPrintOrder(order);
-    setTimeout(() => {
-      window.print();
-      setPrintOrder(null);
-    }, 100);
   }
+
+  // 팝업 차단 폴백: 렌더링 완료 후 인쇄하고 afterprint 시 정리
+  useEffect(() => {
+    if (!printOrder) return;
+    const timer = setTimeout(() => {
+      const cleanup = () => setPrintOrder(null);
+      window.addEventListener('afterprint', cleanup, { once: true });
+      window.print();
+      setTimeout(cleanup, 3000);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [printOrder]);
 
   function exportExcel() {
     const rows = filtered.map((o) => ({
@@ -1419,6 +1435,72 @@ function personalizeMessage(template: string, order: Order) {
     .split('{택배사}').join(order.courier || '')
     .split('{운송장번호}').join(trackingText)
     .split('{계좌번호}').join(getStoredAccountNumber());
+}
+
+function escapeHtml(s: unknown) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// 영수증 인쇄용 독립 HTML (새 창에서 인쇄 대화상자가 뜨고, 버튼으로 재인쇄도 가능)
+function buildReceiptHtml(order: Order) {
+  const balance = order.totalPrice - order.depositAmount;
+  const line = (label: string, value: string, strong = false) =>
+    `<div class="line${strong ? ' strong' : ''}"><span>${escapeHtml(label)}</span><span>${escapeHtml(value)}</span></div>`;
+  const optional = (label: string, v?: string) => (v ? line(label, v) : '');
+  return `<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>영수증 - ${escapeHtml(order.name)}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px 12px; background: #fff; color: #000;
+    font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; }
+  .receipt { max-width: 80mm; margin: 0 auto; font-size: 13px; line-height: 1.6; }
+  h2 { text-align: center; font-size: 17px; margin: 0 0 14px; }
+  .line { display: flex; justify-content: space-between; gap: 12px;
+    border-bottom: 1px dashed #999; padding: 4px 0; }
+  .line span:first-child { flex-shrink: 0; }
+  .line span:last-child { text-align: right; word-break: break-all; }
+  .line.strong { font-weight: 700; }
+  .thanks { text-align: center; margin-top: 16px; }
+  .print-btn { display: block; width: 100%; max-width: 80mm; margin: 18px auto 0;
+    padding: 10px; font-size: 15px; font-weight: 700; background: #166534;
+    color: #fff; border: 0; border-radius: 8px; cursor: pointer; }
+  @media print { .print-btn { display: none; } }
+  @page { margin: 8mm; }
+</style>
+</head>
+<body onload="setTimeout(function(){ try { window.print(); } catch (e) {} }, 350)">
+  <div class="receipt">
+    <h2>절임배추 주문 영수증</h2>
+    ${line('주문일', formatDate(order.createdAt))}
+    ${line('고객명', order.name)}
+    ${line('연락처', order.phone || '-')}
+    ${line('품목', order.cabbageType)}
+    ${line('수량', `${order.quantity} ${order.unit}`)}
+    ${line('단가', formatCurrency(order.pricePerUnit))}
+    ${line('총액', formatCurrency(order.totalPrice), true)}
+    ${line('입금액', formatCurrency(order.depositAmount))}
+    ${line('잔액', formatCurrency(balance), true)}
+    ${line('수령방식', order.pickup)}
+    ${optional('준비일', order.preparationDate ? formatDate(order.preparationDate) : '')}
+    ${optional('수령희망일', order.pickupDate ? formatDate(order.pickupDate) : '')}
+    ${optional('주소', order.address)}
+    ${optional('택배사', order.courier)}
+    ${optional('운송장번호', order.trackingNumber)}
+    ${optional('메모', order.memo)}
+    ${line('입금상태', getPaymentStatus(order))}
+    <p class="thanks">이용해주셔서 감사합니다.</p>
+  </div>
+  <button class="print-btn" onclick="window.print()">🖨️ 인쇄하기</button>
+</body>
+</html>`;
 }
 
 function Receipt({ order }: { order: Order }) {
