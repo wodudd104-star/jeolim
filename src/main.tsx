@@ -891,7 +891,7 @@ export default function App() {
         )}
 
         {page === 'dashboard' ? (
-          <Dashboard orders={orders} products={products} />
+          <Dashboard orders={orders} products={products} onNavigate={(p) => setPage(p)} />
         ) : page === 'customers' && isAdmin() ? (
           <Customers orders={orders} />
         ) : page === 'gallery' && isAdmin() ? (

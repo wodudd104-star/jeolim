@@ -21,9 +21,10 @@ function getPaymentStatus(order: Order): string {
 type DashboardProps = {
   orders: Order[];
   products: Product[];
+  onNavigate: (page: 'orders') => void;
 };
 
-export default function Dashboard({ orders, products }: DashboardProps) {
+export default function Dashboard({ orders, products, onNavigate }: DashboardProps) {
   const stats = useMemo(() => {
     const activeOrders = orders.filter((o) => o.status !== '취소');
     const totalQuantity = activeOrders.reduce((sum, o) => sum + o.quantity, 0);
@@ -85,30 +86,34 @@ export default function Dashboard({ orders, products }: DashboardProps) {
   return (
     <div className='dashboard-shell'>
       <section className='summary dashboard-summary'>
-        <div className='summary-card'>
+        <button className='summary-card' onClick={() => onNavigate('orders')} title='주문관리로 이동'>
           <span className='summary-label'>전체 주문</span>
           <span className='summary-count'>{stats.totalOrders}</span>
-        </div>
-        <div className='summary-card'>
+        </button>
+        <button className='summary-card' onClick={() => onNavigate('orders')} title='주문관리로 이동'>
           <span className='summary-label'>진행 중 주문</span>
           <span className='summary-count'>{stats.activeOrders}</span>
-        </div>
-        <div className='summary-card'>
+        </button>
+        <button className='summary-card' onClick={() => onNavigate('orders')} title='주문관리로 이동'>
           <span className='summary-label'>총 수량</span>
           <span className='summary-count'>{stats.totalQuantity}</span>
-        </div>
-        <div className='summary-card revenue'>
+        </button>
+        <button className='summary-card revenue' onClick={() => onNavigate('orders')} title='주문관리로 이동'>
           <span className='summary-label'>총 매출</span>
           <span className='summary-count'>{formatCurrency(stats.totalRevenue)}</span>
-        </div>
-        <div className='summary-card'>
+        </button>
+        <button className='summary-card' onClick={() => onNavigate('orders')} title='주문관리로 이동'>
           <span className='summary-label'>총 입금</span>
           <span className='summary-count'>{formatCurrency(stats.totalDeposit)}</span>
-        </div>
-        <div className={`summary-card outstanding ${stats.outstanding > 0 ? 'alert' : ''}`}>
+        </button>
+        <button
+          className={`summary-card outstanding ${stats.outstanding > 0 ? 'alert' : ''}`}
+          onClick={() => onNavigate('orders')}
+          title='미수금 확인 - 주문관리로 이동'
+        >
           <span className='summary-label'>미수금</span>
           <span className='summary-count'>{formatCurrency(stats.outstanding)}</span>
-        </div>
+        </button>
       </section>
 
       <div className='dashboard-grid'>
