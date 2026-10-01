@@ -348,12 +348,29 @@ export async function resetFailedLogins(id) {
 }
 
 // ===== 범용 키-값 저장소 (재배포 시에도 유지되는 영구 저장) =====
-// 우선순위: DATABASE_URL(pg) > Supabase Edge Function 브리지 > 로컬 JSON
+// 우선순위: DATABASE_URL(pg) > Supabase REST RPC 브리지 > 로컬 JSON
 function kvBridge() {
   const url = process.env.SUPABASE_URL;
+  const anonKey = process.env.SUPABASE_ANON_KEY;
   const token = process.env.KV_BRIDGE_TOKEN;
-  if (!url || !token) return null;
-  return { url: url.replace(/\/$/, '') + '/functions/v1/kv-store', token };
+  if (!url || !anonKey || !token) return null;
+  return { url: url.replace(/\/$/, '') + '/rest/v1/rpc/kv_bridge', anonKey, token };
+}
+
+async function kvRpc(bridge, op, key, value) {
+  const res = await fetch(bridge.url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: bridge.anonKey,
+      Authorization: `Bearer ${bridge.anonKey}`,
+    },
+    body: JSON.stringify({ p_op: op, p_key: key, p_value: value ?? null, p_token: bridge.token }),
+  });
+  if (!res.ok) throw new Error(`kv rpc 실패 (HTTP ${res.status})`);
+  const data = await res.json();
+  if (data && data.error) throw new Error(`kv rpc 오류: ${data.error}`);
+  return data;
 }
 
 export function hasKv() {
@@ -380,14 +397,8 @@ export async function kvGet(key) {
   }
   const bridge = kvBridge();
   if (!bridge) return null;
-  const res = await fetch(bridge.url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-kv-token': bridge.token },
-    body: JSON.stringify({ op: 'get', key }),
-  });
-  if (!res.ok) throw new Error(`kv 조회 실패 (HTTP ${res.status})`);
-  const data = await res.json();
-  return data.value === undefined ? null : data.value;
+  const data = await kvRpc(bridge, 'get', key, null);
+  return data && data.ok && data.v !== undefined ? data.v : null;
 }
 
 export async function kvSet(key, value) {
@@ -402,10 +413,5 @@ export async function kvSet(key, value) {
   }
   const bridge = kvBridge();
   if (!bridge) return;
-  const res = await fetch(bridge.url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-kv-token': bridge.token },
-    body: JSON.stringify({ op: 'set', key, value }),
-  });
-  if (!res.ok) throw new Error(`kv 저장 실패 (HTTP ${res.status})`);
+  await kvRpc(bridge, 'set', key, value);
 }
