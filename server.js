@@ -478,6 +478,7 @@ app.get('/api/me', requireAuth, async (req, res) => {
     role: user.role,
     active: user.active,
     email: user.email,
+    phone: user.phone || '',
     mustChangePassword: !!req.session.mustChangePassword,
   });
 });
@@ -653,7 +654,8 @@ app.post('/api/users/:id/reset-password', requireAdmin, async (req, res) => {
     const targetPhone = normalizePhone(target.phone || '');
     if (targetPhone) {
       const smsText = `[절임배추 주문관리] ${target.id}님의 비밀번호가 초기화되었습니다. 새 비밀번호: ${newPassword} 로그인 후 비밀번호를 변경해주세요.`;
-      const smsResult = await sendSolapiMessages([targetPhone], smsText);
+      // 비밀번호 초기화 알림은 친구톡이 아닌 일반 문자로 강제 발송 (채널 친구 여부와 무관하게 도착)
+      const smsResult = await sendSolapiMessages([targetPhone], smsText, { forceSms: true });
       smsSent = smsResult.ok;
       smsNote = smsResult.ok ? `${targetPhone}로 문자를 발송했습니다.` : smsResult.error || '';
     } else {
@@ -742,7 +744,7 @@ app.post('/api/reset-password', authLimiter, async (req, res) => {
 });
 
 app.post('/api/update-auth', requireAuth, async (req, res) => {
-  const { currentPassword, newId, newPassword, email } = req.body;
+  const { currentPassword, newId, newPassword, email, phone } = req.body;
   const currentId = req.session.userId;
   const user = await findUserById(currentId);
   if (!user) {
@@ -769,9 +771,14 @@ app.post('/api/update-auth', requireAuth, async (req, res) => {
     const conflict = await findUsersByEmail(email);
     if (conflict.length > 0) return res.status(409).json({ error: '이미 사용 중인 이메일입니다.' });
   }
+  if (phone !== undefined && phone !== null && String(phone).trim() !== '') {
+    const phoneError = validatePhone(String(phone));
+    if (phoneError) return res.status(400).json({ error: phoneError });
+  }
 
   if (newId) patch.id = newId;
   if (email) patch.email = email;
+  if (phone !== undefined) patch.phone = normalizePhone(String(phone || ''));
   if (newPassword) {
     const pwError = validatePassword(newPassword);
     if (pwError) return res.status(400).json({ error: pwError });
@@ -783,6 +790,7 @@ app.post('/api/update-auth', requireAuth, async (req, res) => {
     await createUser({
       id: newId,
       email: patch.email || user.email,
+      phone: patch.phone !== undefined ? patch.phone : user.phone,
       hash: patch.hash || user.hash,
       role: user.role,
       active: user.active,
@@ -827,16 +835,23 @@ function smsByteLength(text) {
 
 // 솔라피 메시지 발송 공통 헬퍼 (단첨문자, 비밀번호 초기화 알림 등에서 재사용)
 // 성공 시 { ok: true }, 실패 시 { ok: false, error } 반환
-async function sendSolapiMessages(phones, text) {
+// opts.forceSms가 true면 카카오 채널 키가 있어도 일반 문자(SMS/LMS)로 발송한다.
+// 친구톡(CTA)은 카카오 채널을 친구 추가한 번호로만 전달되므로,
+// 비밀번호 초기화처럼 반드시 도착해야 하는 알림은 forceSms로 일반 문자를 사용한다.
+async function sendSolapiMessages(phones, text, opts = {}) {
   const apiKey = process.env.SOLAPI_API_KEY;
   const apiSecret = process.env.SOLAPI_API_SECRET;
   const senderKey = process.env.SOLAPI_SENDER_KEY;
   const senderPhone = String(process.env.SOLAPI_SENDER || '').replace(/\D/g, '');
+  const forceSms = !!opts.forceSms;
 
   if (!apiKey || !apiSecret || (!senderKey && !senderPhone)) {
     return { ok: false, error: '문자 API 키가 서버에 등록되지 않았습니다.' };
   }
-  const isKakao = !!senderKey;
+  if (forceSms && !senderPhone) {
+    return { ok: false, error: '발신번호(SOLAPI_SENDER)가 서버에 등록되지 않았습니다.' };
+  }
+  const isKakao = !forceSms && !!senderKey;
   const smsType = smsByteLength(text) <= 90 ? 'SMS' : 'LMS';
   try {
     const response = await fetch('https://api.solapi.com/messages/v4/send-many/detail', {
@@ -859,6 +874,14 @@ async function sendSolapiMessages(phones, text) {
       return {
         ok: false,
         error: `문자 발송이 거절되었습니다. (${result.errorMessage || result.errorCode || `HTTP ${response.status}`})`,
+      };
+    }
+    // 발송 큐 등록은 되었지만 개별 메시지가 거절된 경우 (failedMessageCount > 0)
+    if (Number(result.failedMessageCount) > 0) {
+      console.error('[SMS] Solapi 메시지 거절:', JSON.stringify(result).slice(0, 500));
+      return {
+        ok: false,
+        error: `문자 발송이 거절되었습니다. (${result.resultMessage || '일부 메시지가 실패했습니다'})`,
       };
     }
     return { ok: true, result };

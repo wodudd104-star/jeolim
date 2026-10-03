@@ -796,6 +796,13 @@ h1 {
   font-weight: 600;
 }
 
+.form-success {
+  color: var(--success, #16a34a);
+  font-size: 0.9rem;
+  margin-top: 10px;
+  font-weight: 600;
+}
+
 .order-list {
   display: flex;
   flex-direction: column;

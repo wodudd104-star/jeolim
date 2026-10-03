@@ -199,7 +199,7 @@ export async function me() {
   });
   const data = await res.json().catch(() => null);
   if (!res.ok) return null;
-  return data as { id: string; email: string; role: string; active: boolean; mustChangePassword?: boolean };
+  return data as { id: string; email: string; phone?: string; role: string; active: boolean; mustChangePassword?: boolean };
 }
 
 export async function registerAccount(id: string, password: string, email: string, phone: string) {
@@ -337,12 +337,13 @@ export async function updateServerAuth(
   currentPassword: string,
   newId: string,
   newPassword: string,
-  email: string
+  email: string,
+  phone?: string
 ) {
   const res = await fetch(getUrl('/api/update-auth'), {
     method: 'POST',
     headers: getHeaders(),
-    body: JSON.stringify({ currentPassword, newId, newPassword, email }),
+    body: JSON.stringify({ currentPassword, newId, newPassword, email, phone }),
     credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));

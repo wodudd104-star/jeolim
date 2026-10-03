@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client';
 import * as XLSX from 'xlsx';
 import './style.css';
-import { sendSms, syncPublicOrder, fetchPublicOrder, fetchAllAppData, syncAppData, me, submitPublicCustomer, fetchCustomerIntake, ackCustomerIntake, confirmPublicPayment, fetchPublicPayments, subscribeEvents } from './lib/api';
+import { sendSms, syncPublicOrder, fetchPublicOrder, fetchAllAppData, syncAppData, me, submitPublicCustomer, fetchCustomerIntake, ackCustomerIntake, confirmPublicPayment, fetchPublicPayments, subscribeEvents, updateServerAuth } from './lib/api';
 import { load, save } from './lib/storage';
 import { compressImages } from './lib/images';
 import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page, Customer } from './types';
@@ -286,6 +286,22 @@ export default function App() {
   const [printOrder, setPrintOrder] = useState<Order | null>(null);
   const [isPostcodeOpen, setIsPostcodeOpen] = useState(false);
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [profileForm, setProfileForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+    email: '',
+    phone: '',
+  });
+  const [profileError, setProfileError] = useState('');
+  const [profileSuccess, setProfileSuccess] = useState('');
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [myProfile, setMyProfile] = useState<{ id: string; email: string; phone: string }>({
+    id: '',
+    email: '',
+    phone: '',
+  });
   const [photoModalOrderId, setPhotoModalOrderId] = useState<string | null>(null);
   const [accountNumber, setAccountNumber] = useState(() => getStoredAccountNumber());
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -588,6 +604,68 @@ export default function App() {
     () => (photoModalOrderId ? orders.find((o) => o.id === photoModalOrderId) : undefined),
     [photoModalOrderId, orders]
   );
+
+  // ===== 회원정보수정 모달 =====
+  const openProfileModal = () => {
+    setProfileError('');
+    setProfileSuccess('');
+    setProfileForm({ currentPassword: '', newPassword: '', confirmPassword: '', email: '', phone: '' });
+    setIsProfileOpen(true);
+    void (async () => {
+      try {
+        const info = await me();
+        if (!info) return;
+        const p = { id: info.id, email: info.email || '', phone: info.phone || '' };
+        setMyProfile(p);
+        setProfileForm((f) => ({ ...f, email: p.email, phone: p.phone }));
+      } catch { /* 무시 */ }
+    })();
+  };
+
+  const submitProfile = async () => {
+    setProfileError('');
+    setProfileSuccess('');
+    const f = profileForm;
+    if (!f.currentPassword) {
+      setProfileError('현재 비밀번호를 입력해주세요.');
+      return;
+    }
+    if (f.newPassword) {
+      if (f.newPassword.length < 8 || !/[A-Za-z]/.test(f.newPassword) || !/[0-9]/.test(f.newPassword)) {
+        setProfileError('새 비밀번호는 8자 이상이며 영문과 숫자를 포함해야 합니다.');
+        return;
+      }
+      if (f.newPassword !== f.confirmPassword) {
+        setProfileError('새 비밀번호가 서로 다릅니다.');
+        return;
+      }
+    }
+    const emailChanged = f.email.trim() !== myProfile.email;
+    if (emailChanged && !/^\S+@\S+\.\S+$/.test(f.email.trim())) {
+      setProfileError('올바른 이메일을 입력해주세요.');
+      return;
+    }
+    const phoneDigits = f.phone.replace(/[^0-9]/g, '');
+    if (f.phone.trim() && !/^01[016789][0-9]{7,8}$/.test(phoneDigits)) {
+      setProfileError('올바른 핸드폰번호를 입력해주세요. (예: 01012345678)');
+      return;
+    }
+    if (!f.newPassword && !emailChanged && phoneDigits === myProfile.phone) {
+      setProfileError('변경할 항목이 없습니다.');
+      return;
+    }
+    setProfileBusy(true);
+    try {
+      await updateServerAuth(f.currentPassword, '', f.newPassword, f.email.trim(), phoneDigits);
+      setMyProfile((p) => ({ ...p, email: f.email.trim(), phone: phoneDigits }));
+      setProfileForm((prev) => ({ ...prev, currentPassword: '', newPassword: '', confirmPassword: '' }));
+      setProfileSuccess('회원정보가 저장되었습니다. 다른 기기의 로그인은 해제됩니다.');
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : '회원정보 수정에 실패했습니다.');
+    } finally {
+      setProfileBusy(false);
+    }
+  };
 
   const summary = useMemo(() => {
     const activeOrders = orders.filter((o) => o.status !== '취소');
@@ -1124,6 +1202,9 @@ export default function App() {
                 + 새 주문
               </button>
             )}
+            <button className='btn' onClick={openProfileModal} title='내 회원정보 수정'>
+              👤 회원정보수정
+            </button>
             <button className='btn' onClick={handleLogout}>
               로그아웃
             </button>
@@ -1187,6 +1268,92 @@ export default function App() {
                 단체 문자 발송 시 {'{계좌번호}'} 변수에 들어갈 계좌번호를 입력하세요.
               </p>
               <AccountManager />
+            </div>
+          </div>
+        )}
+
+        {isProfileOpen && (
+          <div
+            className='modal-overlay'
+            onClick={(e) => e.target === e.currentTarget && setIsProfileOpen(false)}
+          >
+            <div className='modal panel account-modal'>
+              <div className='modal-header'>
+                <h2>회원정보수정</h2>
+                <button className='btn icon' onClick={() => setIsProfileOpen(false)}>
+                  ✕
+                </button>
+              </div>
+              <p className='panel-hint'>
+                아이디: <strong>{myProfile.id}</strong> — 수정 내용 저장 시 현재 비밀번호 확인이 필요합니다.
+              </p>
+              <label>
+                이메일
+                <input
+                  type='email'
+                  className='input'
+                  value={profileForm.email}
+                  onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })}
+                  placeholder='example@email.com'
+                />
+              </label>
+              <label>
+                핸드폰번호 (비밀번호 초기화 문자 수신용)
+                <input
+                  type='tel'
+                  className='input'
+                  value={profileForm.phone}
+                  onChange={(e) => setProfileForm({ ...profileForm, phone: e.target.value })}
+                  placeholder='01012345678'
+                />
+              </label>
+              <label>
+                새 비밀번호 (변경 시에만 입력)
+                <input
+                  type='password'
+                  className='input'
+                  value={profileForm.newPassword}
+                  onChange={(e) => setProfileForm({ ...profileForm, newPassword: e.target.value })}
+                  placeholder='8자 이상, 영문+숫자 포함'
+                />
+              </label>
+              {profileForm.newPassword && (
+                <label>
+                  새 비밀번호 확인
+                  <input
+                    type='password'
+                    className='input'
+                    value={profileForm.confirmPassword}
+                    onChange={(e) => setProfileForm({ ...profileForm, confirmPassword: e.target.value })}
+                    placeholder='새 비밀번호를 다시 입력'
+                  />
+                </label>
+              )}
+              <label>
+                현재 비밀번호 (필수)
+                <input
+                  type='password'
+                  className='input'
+                  value={profileForm.currentPassword}
+                  onChange={(e) => setProfileForm({ ...profileForm, currentPassword: e.target.value })}
+                  placeholder='본인 확인을 위해 입력'
+                />
+              </label>
+              {profileError && <p className='form-error'>{profileError}</p>}
+              {profileSuccess && <p className='form-success'>{profileSuccess}</p>}
+              <div className='form-actions'>
+                <button type='button' className='btn' onClick={() => setIsProfileOpen(false)}>
+                  닫기
+                </button>
+                <button
+                  type='button'
+                  className='btn btn-primary'
+                  onClick={() => void submitProfile()}
+                  disabled={profileBusy}
+                >
+                  {profileBusy ? '저장 중...' : '저장'}
+                </button>
+              </div>
             </div>
           </div>
         )}
