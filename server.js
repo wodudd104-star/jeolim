@@ -1185,9 +1185,21 @@ app.get('/api/payments/public-orders', requireAuth, async (_req, res) => {
 
 app.put('/api/public/gallery', requireAuth, async (req, res) => {
   try {
+    // 사진 등록은 관리자 전용 (일반 회원이 임의로 공개 사진을 바꾸지 못하게 함)
+    if (req.session.role !== 'admin') {
+      return res.status(403).json({ error: '관리자만 사진을 등록할 수 있습니다.' });
+    }
     const { items, notice } = req.body || {};
     if (!Array.isArray(items)) {
       return res.status(400).json({ error: '잘못된 요청입니다.' });
+    }
+    if (items.length > 10) {
+      return res.status(400).json({ error: '사진은 최대 10장까지 등록할 수 있습니다.' });
+    }
+    for (const it of items) {
+      if (!it || typeof it !== 'object' || typeof it.image !== 'string' || it.image.length < 10) {
+        return res.status(400).json({ error: '잘못된 사진 데이터가 포함되어 있습니다.' });
+      }
     }
     await storeWrite('public_gallery', PUBLIC_GALLERY_FILE, { items, notice: String(notice || '') });
     broadcastChange('gallery', req.headers['x-client-id']);

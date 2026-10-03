@@ -1,11 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { GalleryItem } from '../types';
-import { load, save } from '../lib/storage';
-import { compressImages, saveSafely } from '../lib/images';
+import { compressImages } from '../lib/images';
 import { syncPublicGallery, fetchPublicGallery } from '../lib/api';
 
-const GALLERY_KEY = 'jc_gallery_v1';
-const GALLERY_NOTICE_KEY = 'jc_gallery_notice_v1';
 const MAX_GALLERY_PHOTOS = 10;
 
 export function getGalleryPublicUrl() {
@@ -14,25 +11,9 @@ export function getGalleryPublicUrl() {
   return url.toString();
 }
 
-export function loadGallery(): GalleryItem[] {
-  return load(GALLERY_KEY, []);
-}
-
-export function saveGallery(items: GalleryItem[]) {
-  save(GALLERY_KEY, items);
-}
-
-export function loadGalleryNotice(): string {
-  return load(GALLERY_NOTICE_KEY, '');
-}
-
-export function saveGalleryNotice(notice: string) {
-  save(GALLERY_NOTICE_KEY, notice);
-}
-
 export function PublicGallery() {
-  const [items, setItems] = useState<GalleryItem[]>(() => loadGallery());
-  const [notice, setNotice] = useState(() => loadGalleryNotice());
+  const [items, setItems] = useState<GalleryItem[]>([]);
+  const [notice, setNotice] = useState('');
 
   useEffect(() => {
     let alive = true;
@@ -44,7 +25,7 @@ export function PublicGallery() {
           setNotice(String(remote.notice || ''));
         }
       } catch {
-        // 로컬 데이터 유지
+        // 서버에 데이터가 없으면 빈 화면 유지
       }
     })();
     return () => {
@@ -81,30 +62,93 @@ export function PublicGallery() {
 }
 
 export default function Gallery({ refreshSignal }: { refreshSignal?: number }) {
-  const [items, setItems] = useState<GalleryItem[]>(() => loadGallery());
-  const [notice, setNotice] = useState(() => loadGalleryNotice());
+  const [items, setItems] = useState<GalleryItem[]>([]);
+  const [notice, setNotice] = useState('');
+  const [loaded, setLoaded] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const [copied, setCopied] = useState(false);
   const [generatedUrl, setGeneratedUrl] = useState('');
   const [generating, setGenerating] = useState(false);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [saveError, setSaveError] = useState('');
 
-  // 다른 기기에서 사진/공지가 저장·수정되면(SSE) 새로고침 없이 갱신
+  // 아직 서버에 저장하지 않은 로컬 수정이 있으면 다른 기기 변경을 받아들이지 않음
+  const dirtyRef = useRef(false);
+  const stateRef = useRef({ items, notice });
+  useEffect(() => {
+    stateRef.current = { items, notice };
+  }, [items, notice]);
+  const saveTimerRef = useRef<number | null>(null);
+
+  // 서버에서 사진/공지 불러오기 (서버가 항상 최종 기준)
+  const reloadFromServer = useCallback(async () => {
+    if (dirtyRef.current) return; // 저장 대기 중인 로컬 수정 보호
+    try {
+      const remote = await fetchPublicGallery();
+      if (remote && Array.isArray(remote.items)) {
+        setItems(remote.items);
+        setNotice(String(remote.notice || ''));
+      }
+    } catch {
+      // 서버 오류 시 현재 화면 유지
+    } finally {
+      setLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadFromServer();
+  }, [reloadFromServer]);
+
+  // 다른 기기에서 사진/공지가 저장되면(SSE) 실시간으로 서버 값 반영
   React.useEffect(() => {
     if (refreshSignal === undefined) return;
-    setItems(loadGallery());
-    setNotice(loadGalleryNotice());
-  }, [refreshSignal]);
+    void reloadFromServer();
+  }, [refreshSignal, reloadFromServer]);
+
+  // 즉시 서버 저장
+  const saveNow = useCallback(async (): Promise<boolean> => {
+    const cur = stateRef.current;
+    setSaveState('saving');
+    setSaveError('');
+    try {
+      await syncPublicGallery(cur.items, cur.notice);
+      dirtyRef.current = false;
+      setSaveState('saved');
+      return true;
+    } catch (err) {
+      setSaveState('error');
+      setSaveError(err instanceof Error ? err.message : '서버 저장에 실패했습니다.');
+      return false;
+    }
+  }, []);
+
+  // 변경 내용은 잠시 모았다가 서버에 저장 (네트워크 과다 요청 방지)
+  const scheduleSave = useCallback(
+    (delay = 800) => {
+      dirtyRef.current = true;
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = window.setTimeout(() => {
+        void saveNow();
+      }, delay);
+    },
+    [saveNow]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    };
+  }, []);
 
   function commitItems(next: GalleryItem[]) {
     setItems(next);
-    if (!saveSafely((v) => saveGallery(v as GalleryItem[]), next)) {
-      setItems(items);
-    }
+    scheduleSave(800);
   }
 
   function commitNotice(next: string) {
     setNotice(next);
-    saveGalleryNotice(next);
+    scheduleSave(1200); // 타이핑 중에는 좀 더 대기
   }
 
   async function handlePhotoSelect(e: React.ChangeEvent<HTMLInputElement>) {
@@ -158,7 +202,7 @@ export default function Gallery({ refreshSignal }: { refreshSignal?: number }) {
     commitItems(next);
   }
 
-  // 완료 버튼: 서버에 사진+유의사항을 저장하고 공개 URL 생성
+  // 완료 버튼: 서버에 확정 저장하고 공개 URL 생성
   async function finalizeGallery() {
     if (items.length === 0) {
       alert('등록된 사진이 없습니다. 사진을 먼저 추가해주세요.');
@@ -166,7 +210,11 @@ export default function Gallery({ refreshSignal }: { refreshSignal?: number }) {
     }
     setGenerating(true);
     try {
-      await syncPublicGallery(items, notice);
+      const ok = await saveNow();
+      if (!ok) {
+        alert(saveError || '서버 저장에 실패했습니다. 잠시 후 다시 시도해주세요.');
+        return;
+      }
       const url = getGalleryPublicUrl();
       setGeneratedUrl(url);
       try {
@@ -219,12 +267,14 @@ export default function Gallery({ refreshSignal }: { refreshSignal?: number }) {
       </header>
 
       <p className='panel-hint gallery-hint'>
-        주문별 완료 사진과 분리된 공용 사진입니다. 사진은 선택사항이며 최대 {MAX_GALLERY_PHOTOS}장까지 등록할 수 있습니다. 각 사진 아래에
+        사진은 서버에 자동 저장되어 모든 기기에서 실시간으로 함께 보입니다 (최대 {MAX_GALLERY_PHOTOS}장). 각 사진 아래에
         설명이나 주의사항을 적을 수 있고, ◀ ▶ 버튼으로 순서를 변경할 수 있습니다. 등록이 끝나면
-        맨 아래 [완료] 버튼을 눌러 URL을 생성하세요.
+        맨 아래 [완료] 버튼을 눌러 공개 URL을 생성하세요.
       </p>
 
-      {items.length === 0 ? (
+      {!loaded ? (
+        <div className='empty'>사진을 불러오는 중...</div>
+      ) : items.length === 0 ? (
         <div className='empty'>등록된 사진이 없습니다. 위 버튼으로 사진을 추가하세요.</div>
       ) : (
         <div className='gallery-grid'>
@@ -278,8 +328,16 @@ export default function Gallery({ refreshSignal }: { refreshSignal?: number }) {
           rows={4}
           value={notice}
           onChange={(e) => commitNotice(e.target.value)}
-          placeholder='유의사항을 입력하세요 (선택). 완료 후 공개 화면 맨 위에 표시됩니다.'
+          placeholder='유의사항을 입력하세요 (선택). 공개 화면 맨 위에 표시됩니다.'
         />
+      </div>
+
+      <div className='gallery-save-status' aria-live='polite'>
+        {saveState === 'saving' && <span className='gallery-save-saving'>서버 저장 중...</span>}
+        {saveState === 'saved' && <span className='gallery-save-saved'>✓ 서버에 저장되었습니다 (모든 기기 연동)</span>}
+        {saveState === 'error' && (
+          <span className='gallery-save-error'>⚠ 저장 실패: {saveError} — [완료] 버튼으로 다시 시도해주세요.</span>
+        )}
       </div>
 
       <div className='gallery-final'>

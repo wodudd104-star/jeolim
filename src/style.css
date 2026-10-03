@@ -632,6 +632,25 @@ h1 {
   white-space: pre-wrap;
 }
 
+.gallery-save-status {
+  min-height: 22px;
+  margin-top: 14px;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.gallery-save-saving {
+  color: var(--muted, #6b7280);
+}
+
+.gallery-save-saved {
+  color: var(--success, #16a34a);
+}
+
+.gallery-save-error {
+  color: var(--danger, #dc2626);
+}
+
 .gallery-final {
   margin-top: 16px;
   display: flex;

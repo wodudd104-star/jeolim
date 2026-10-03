@@ -316,13 +316,13 @@ export default function App() {
   useEffect(() => save(PRODUCTS_KEY, products), [products]);
 
   // ===== 서버 자동저장/복원 (배포·재배포 시 데이터 보존) =====
+  // gallery는 제외: 사진은 /api/public/gallery 를 통해 서버 기준으로 저장·연동됨
+  // (빈 기기의 localStorage가 서버 사진을 덮어써서 초기화되는 문제 방지)
   const SYNC_KEYS: Record<string, string> = {
     orders: ORDERS_KEY,
     products: PRODUCTS_KEY,
     customers: 'jc_customers_v1',
     accounts: 'jc_accounts',
-    gallery: 'jc_gallery_v1',
-    gallery_notice: 'jc_gallery_notice_v1',
   };
 
   const [booted, setBooted] = useState(() => !isLoggedIn());
@@ -393,9 +393,6 @@ export default function App() {
             }
             if (key === 'products') setProducts(serverValue);
             if (key === 'customers') setCustomersRefresh((v) => v + 1);
-            if (key === 'gallery' || key === 'gallery_notice') {
-              setGalleryRefresh((v) => v + 1);
-            }
           }
         }
       } catch {
@@ -551,6 +548,11 @@ export default function App() {
         void syncPayments();
         return;
       }
+      // 갤러리는 서버 기준 저장 방식: 서버에서 다시 불러오라고 화면에 신호만 보냄
+      if (key === 'gallery' || key === 'gallery_notice') {
+        setGalleryRefresh((v) => v + 1);
+        return;
+      }
       const lsKey = SYNC_KEYS[key];
       if (!lsKey) return;
       // 아직 서버로 못 보낸 로컬 수정이 있으면 덮어쓰지 않음 (다음 푸시 때 반영됨)
@@ -575,9 +577,8 @@ export default function App() {
           if (key === 'products' && Array.isArray(serverValue)) {
             setProducts(serverValue as Product[]);
           }
-          // 고객·갤러리처럼 컴포넌트가 자체 상태를 갖는 화면은 갱신 신호를 보냄
+          // 고객처럼 컴포넌트가 자체 상태를 갖는 화면은 갱신 신호를 보냄
           if (key === 'customers') setCustomersRefresh((v) => v + 1);
-          if (key === 'gallery' || key === 'gallery_notice') setGalleryRefresh((v) => v + 1);
         } catch { /* 무시 */ }
       })();
     });
