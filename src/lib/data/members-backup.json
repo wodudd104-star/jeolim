@@ -9,6 +9,16 @@
       "createdAt": "2026-09-30T17:10:12.260Z",
       "failed_logins": 0,
       "locked_until": null
+    },
+    {
+      "id": "testuser1",
+      "email": "t@t.com",
+      "hash": "$2b$12$C3jJ0kB.qQFnHCt6jKLqneJpPVCwcdWf9eBtRSdkAihrcspOR7GBy",
+      "role": "user",
+      "active": true,
+      "createdAt": "2026-10-03T09:38:26.428Z",
+      "failed_logins": 0,
+      "locked_until": null
     }
   ]
 }

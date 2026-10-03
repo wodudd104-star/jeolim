@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { load, save } from '../lib/storage';
+import { clearMustChangePassword } from './Login';
 import {
   activateUser,
   createUser,
@@ -8,6 +9,7 @@ import {
   demoteUser,
   fetchUsers,
   promoteUser,
+  resetUserPassword,
   updateServerAuth,
 } from '../lib/api';
 
@@ -160,15 +162,22 @@ export default function Admin() {
   const [message, setMessage] = useState('');
 
   const [users, setUsers] = useState<
-    { id: string; email: string; role: string; active: boolean; createdAt: string }[]
+    { id: string; email: string; phone?: string; role: string; active: boolean; createdAt: string }[]
   >([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
+  // 비밀번호 초기화 모달 + 결과 배너 (앱 WebView에서는 prompt/alert가 동작하지 않아 화면 내 UI로 구현)
+  const [resetTarget, setResetTarget] = useState<{ id: string } | null>(null);
+  const [resetPwInput, setResetPwInput] = useState('');
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetError, setResetError] = useState('');
+  const [resetResult, setResetResult] = useState<{ id: string; tempPassword: string; smsSent?: boolean; smsNote?: string } | null>(null);
   const [addForm, setAddForm] = useState({
     id: '',
     password: '',
     confirm: '',
     email: '',
+    phone: '',
     role: 'user',
     active: true,
   });
@@ -224,6 +233,7 @@ export default function Admin() {
     try {
       const result = await updateServerAuth(currentPassword, newId, newPassword, email);
       setStoredUser({ id: result.id || newId, role: currentUser.role, email });
+      clearMustChangePassword();
       setCurrentPassword('');
       setNewId('');
       setNewPassword('');
@@ -270,8 +280,8 @@ export default function Admin() {
   async function handleAddUser(e: React.FormEvent) {
     e.preventDefault();
     setMessage('');
-    if (!addForm.id.trim() || !addForm.password.trim() || !addForm.email.trim()) {
-      setMessage('아이디, 비밀번호, 이메일을 모두 입력해주세요.');
+    if (!addForm.id.trim() || !addForm.password.trim() || !addForm.email.trim() || !addForm.phone.trim()) {
+      setMessage('아이디, 비밀번호, 이메일, 핸드폰번호를 모두 입력해주세요.');
       return;
     }
     if (addForm.id.length < 3 || !/^[a-zA-Z0-9_]+$/.test(addForm.id)) {
@@ -286,9 +296,14 @@ export default function Admin() {
       setMessage('비밀번호와 비밀번호 확인이 일치하지 않습니다.');
       return;
     }
+    const phoneDigits = addForm.phone.replace(/[^0-9]/g, '');
+    if (!/^01[016789][0-9]{7,8}$/.test(phoneDigits)) {
+      setMessage('올바른 핸드폰번호를 입력해주세요. (예: 01012345678)');
+      return;
+    }
     try {
-      await createUser(addForm.id, addForm.password, addForm.email, addForm.role, addForm.active);
-      setAddForm({ id: '', password: '', confirm: '', email: '', role: 'user', active: true });
+      await createUser(addForm.id, addForm.password, addForm.email, phoneDigits, addForm.role, addForm.active);
+      setAddForm({ id: '', password: '', confirm: '', email: '', phone: '', role: 'user', active: true });
       setIsAddOpen(false);
       loadUserList();
     } catch (err: any) {
@@ -304,6 +319,44 @@ export default function Admin() {
     } catch (err: any) {
       setMessage(err.message || '삭제 실패');
     }
+  }
+
+  function openResetModal(user: { id: string }) {
+    setResetTarget(user);
+    setResetPwInput('');
+    setResetError('');
+  }
+
+  async function confirmResetPassword() {
+    if (!resetTarget || resetBusy) return;
+    const pw = resetPwInput.trim();
+    if (pw && (pw.length < 8 || !/[A-Za-z]/.test(pw) || !/[0-9]/.test(pw))) {
+      setResetError('비밀번호는 8자 이상이며 영문과 숫자를 포함해야 합니다.');
+      return;
+    }
+    setResetBusy(true);
+    setResetError('');
+    try {
+      const result = await resetUserPassword(resetTarget.id, pw || undefined);
+      setResetResult({
+        id: resetTarget.id,
+        tempPassword: result.tempPassword,
+        smsSent: result.smsSent,
+        smsNote: result.smsNote,
+      });
+      setResetTarget(null);
+    } catch (err: any) {
+      setResetError(err.message || '비밀번호 초기화 실패');
+    } finally {
+      setResetBusy(false);
+    }
+  }
+
+  function copyResetPassword() {
+    if (!resetResult) return;
+    try {
+      navigator.clipboard?.writeText(resetResult.tempPassword);
+    } catch { /* 무시 */ }
   }
 
   function clearAllData() {
@@ -328,6 +381,29 @@ export default function Admin() {
           <h1>관리자 설정</h1>
         </div>
       </header>
+
+      {resetResult && (
+        <div className='reset-result-banner' role='alert'>
+          <span>
+            <strong>{resetResult.id}</strong> 회원의 비밀번호가 초기화되었습니다.
+            새 비밀번호: <strong className='reset-result-pw'>{resetResult.tempPassword}</strong>
+            <br />
+            {resetResult.smsSent
+              ? `📱 ${resetResult.smsNote} 회원의 기존 로그인은 모두 해제됩니다.`
+              : resetResult.smsNote
+                ? `⚠ 문자 미발송: ${resetResult.smsNote} 새 비밀번호를 직접 전달해주세요.`
+                : '회원에게 전달해주세요. 해당 회원의 기존 로그인은 모두 해제됩니다.'}
+          </span>
+          <div className='reset-result-actions'>
+            <button className='btn' onClick={copyResetPassword}>
+              복사
+            </button>
+            <button className='btn' onClick={() => setResetResult(null)}>
+              확인
+            </button>
+          </div>
+        </div>
+      )}
 
       <section className='panel account-panel'>
         <div className='account-panel-header'>
@@ -441,6 +517,16 @@ export default function Admin() {
                 />
               </label>
               <label>
+                핸드폰번호
+                <input
+                  type='tel'
+                  className='input'
+                  value={addForm.phone}
+                  onChange={(e) => setAddForm({ ...addForm, phone: e.target.value })}
+                  placeholder='핸드폰번호 (비밀번호 초기화 문자 수신용)'
+                />
+              </label>
+              <label>
                 비밀번호
                 <input
                   type='password'
@@ -500,6 +586,7 @@ export default function Admin() {
                 <div className='user-info'>
                   <span className='user-id'>{user.id}</span>
                   <span className='user-email'>{user.email}</span>
+                  {user.phone && <span className='user-email'>{user.phone}</span>}
                   <span className={`tag ${user.role === 'admin' ? 'highlight' : ''}`}>
                     {user.role === 'admin' ? '관리자' : '사용자'}
                   </span>
@@ -508,6 +595,11 @@ export default function Admin() {
                   </span>
                 </div>
                 <div className='user-actions'>
+                  {user.id !== currentUser.id && (
+                    <button className='btn' onClick={() => openResetModal(user)}>
+                      비밀번호 초기화
+                    </button>
+                  )}
                   {user.role !== 'admin' && (
                     <button
                       className={`btn ${user.active ? '' : 'btn-primary'}`}
@@ -551,6 +643,51 @@ export default function Admin() {
           ⚠ 모든 데이터 삭제
         </button>
       </section>
+
+      {resetTarget && (
+        <div
+          className='modal-overlay'
+          onClick={(e) => e.target === e.currentTarget && setResetTarget(null)}
+        >
+          <div className='modal panel'>
+            <div className='modal-header'>
+              <h2>비밀번호 초기화</h2>
+              <button className='btn icon' onClick={() => setResetTarget(null)}>
+                ✕
+              </button>
+            </div>
+            <p className='panel-hint'>
+              <strong>{resetTarget.id}</strong> 회원의 새 비밀번호를 입력하세요.
+              비워두면 임시 비밀번호가 자동 생성됩니다.
+            </p>
+            <label>
+              새 비밀번호 (선택)
+              <input
+                type='text'
+                className='input'
+                value={resetPwInput}
+                onChange={(e) => setResetPwInput(e.target.value)}
+                placeholder='비워두면 임시 비밀번호 자동 생성'
+                autoFocus
+              />
+            </label>
+            {resetError && <p className='form-error'>{resetError}</p>}
+            <div className='form-actions'>
+              <button type='button' className='btn' onClick={() => setResetTarget(null)}>
+                취소
+              </button>
+              <button
+                type='button'
+                className='btn btn-primary'
+                onClick={confirmResetPassword}
+                disabled={resetBusy}
+              >
+                {resetBusy ? '초기화 중...' : '초기화 실행'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -2,11 +2,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client';
 import * as XLSX from 'xlsx';
 import './style.css';
-import { sendSms, syncPublicOrder, fetchPublicOrder, fetchAllAppData, syncAppData, me, submitPublicCustomer, fetchCustomerIntake, ackCustomerIntake } from './lib/api';
+import { sendSms, syncPublicOrder, fetchPublicOrder, fetchAllAppData, syncAppData, me, submitPublicCustomer, fetchCustomerIntake, ackCustomerIntake, confirmPublicPayment, fetchPublicPayments, subscribeEvents } from './lib/api';
 import { load, save } from './lib/storage';
-import { compressImage } from './lib/images';
+import { compressImages } from './lib/images';
 import { Order, Product, OrderStatus, PickupType, PaymentStatus, Page, Customer } from './types';
-import Login, { isAdmin, isLoggedIn, performLogout } from './components/Login';
+import Login, { isAdmin, isLoggedIn, mustChangePassword, performLogout } from './components/Login';
 import Customers, { loadCustomers, saveCustomers, updateCustomer } from './components/Customers';
 import Admin, { AccountManager, getStoredAccountNumber } from './components/Admin';
 import Dashboard from './components/Dashboard';
@@ -55,8 +55,69 @@ function loadOrders(): Order[] {
   return normalizeOrders(load<StoredOrder[]>(ORDERS_KEY, []));
 }
 
-// URL 자가등록(공개 폼)으로 접수된 고객을 고객관리 목록에 병합
-async function mergeCustomerIntake() {
+// URL 접수 고객 데이터로 주문 자동 생성 (첫 품목 기준, 이후 수정 가능)
+function buildOrderFromIntake(entry: Customer): Order {
+  const products = load(PRODUCTS_KEY, defaultProducts);
+  const product = products[0] || defaultProducts[0];
+  const quantity = Number(entry.quantity) > 0 ? Number(entry.quantity) : 1;
+  const pickup: PickupType =
+    entry.receiveMethod === '배송' || entry.receiveMethod === '택배' ? '배송' : '매장방문';
+  const memoParts = ['[고객등록 URL 접수]'];
+  if (entry.receiveMethod) memoParts.push(`수령: ${entry.receiveMethod}`);
+  if (entry.memo) memoParts.push(String(entry.memo));
+  return {
+    id: crypto.randomUUID(),
+    createdAt: entry.createdAt || new Date().toISOString(),
+    name: entry.name || '',
+    phone: entry.phone || '',
+    productId: product.id,
+    cabbageType: product.name,
+    quantity,
+    unit: product.unit,
+    pricePerUnit: product.price,
+    totalPrice: quantity * product.price,
+    depositAmount: 0,
+    pickup,
+    pickupDate: entry.arrivalDate || '',
+    preparationDate: '',
+    address: entry.address || '',
+    memo: memoParts.join(' / '),
+    status: '접수',
+    deposit: false,
+    intakeId: entry.id,
+  };
+}
+
+// 서버의 결제 완료 기록 (orderId → 결제 정보) — 폴스루로 갱신됨
+const paymentsRef = {
+  current: new Map<string, { paidAt?: string; paidAmount?: number; paymentMethod?: string }>(),
+};
+
+// 서버의 결제 완료 기록을 주문 목록에 반영 (완납 처리)
+function applyPublicPayments(current: Order[]): { next: Order[]; changed: boolean } {
+  const pending = paymentsRef.current;
+  if (pending.size === 0) return { next: current, changed: false };
+  let changed = false;
+  const next = current.map((o) => {
+    const pay = pending.get(o.id);
+    if (!pay) return o;
+    // 이미 완납 반영된 주문은 건드리지 않되, 입금액이 누락됐으면 보정
+    if (o.paid && o.depositAmount >= o.totalPrice) return o;
+    changed = true;
+    return {
+      ...o,
+      paid: true,
+      paidAt: o.paidAt ?? pay.paidAt,
+      paidAmount: o.paidAmount ?? pay.paidAmount,
+      paymentMethod: o.paymentMethod ?? pay.paymentMethod,
+      depositAmount: o.totalPrice,
+    };
+  });
+  return { next, changed };
+}
+
+// URL 자가등록(공개 폼)으로 접수된 고객을 고객관리 목록과 주문 목록에 병합
+async function mergeCustomerIntake(appendOrders?: (orders: Order[]) => void) {
   try {
     const entries = await fetchCustomerIntake();
     if (!Array.isArray(entries) || entries.length === 0) return;
@@ -67,6 +128,14 @@ async function mergeCustomerIntake() {
       saveCustomers([...existing, ...fresh]);
       window.dispatchEvent(new Event('jc-customers-updated'));
     }
+    // 접수된 고객은 주문 목록에도 자동 등록 (intakeId로 중복 방지)
+    const seenIntake = new Set(
+      loadOrders().map((o) => o.intakeId).filter(Boolean) as string[]
+    );
+    const newOrders = (entries as Customer[])
+      .filter((e) => e && e.id && !seenIntake.has(e.id))
+      .map((e) => buildOrderFromIntake(e));
+    if (newOrders.length > 0 && appendOrders) appendOrders(newOrders);
     await ackCustomerIntake((entries as Customer[]).map((e) => e.id));
   } catch {
     // 서버 부재 시 무시
@@ -159,10 +228,23 @@ function getOrderPublicUrl(orderId: string) {
 }
 
 function getPaymentStatus(order: Order): PaymentStatus {
+  if (order.paid) return '완납';
   if (order.status === '취소') return '완납';
   if (order.depositAmount >= order.totalPrice) return '완납';
   if (order.depositAmount <= 0) return '미납';
   return '부분납';
+}
+
+function getBalance(order: Order): number {
+  if (order.paid) return 0;
+  return Math.max(0, order.totalPrice - order.depositAmount);
+}
+
+// 수령/배송 희망일 기준 준비일(4일 전) 자동 계산
+// ('YYYY-MM-DD'는 UTC 기준으로 파싱되므로 시차 오차 없이 안전)
+function calcPreparationDate(pickupDate: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(pickupDate)) return '';
+  return new Date(new Date(pickupDate).getTime() - 4 * 86400000).toISOString().slice(0, 10);
 }
 
 const emptyOrder: Omit<Order, 'id' | 'createdAt'> = {
@@ -229,6 +311,36 @@ export default function App() {
 
   const [booted, setBooted] = useState(() => !isLoggedIn());
 
+  // 접수된 고객 데이터를 주문 목록 앞에 추가 (중복 방지)
+  const appendIntakeOrders = useCallback((newOrders: Order[]) => {
+    setOrders((prev) => {
+      const prevIntake = new Set(
+        prev.map((o) => o.intakeId).filter(Boolean) as string[]
+      );
+      const toAdd = newOrders.filter((o) => !o.intakeId || !prevIntake.has(o.intakeId));
+      return toAdd.length > 0 ? [...toAdd.slice().reverse(), ...prev] : prev;
+    });
+  }, []);
+
+  // 서버의 결제 완료 기록을 가져와 주문 목록에 완납 반영
+  const syncPayments = useCallback(async () => {
+    if (!isLoggedIn()) return;
+    try {
+      const list = await fetchPublicPayments();
+      if (Array.isArray(list)) {
+        paymentsRef.current = new Map(
+          list.filter((p) => p && p.id).map((p) => [p.id, p])
+        );
+      }
+    } catch {
+      return;
+    }
+    setOrders((prev) => {
+      const { next, changed } = applyPublicPayments(prev);
+      return changed ? next : prev;
+    });
+  }, []);
+
   // 로그인 상태로 시작하면 서버에 저장된 데이터를 먼저 복원 (로컬이 비어있을 때만)
   useEffect(() => {
     if (!loggedIn) {
@@ -255,19 +367,18 @@ export default function App() {
           for (const [key, lsKey] of Object.entries(SYNC_KEYS)) {
             const serverValue = (all as any)[key];
             if (serverValue === undefined || serverValue === null) continue;
-            const localRaw = localStorage.getItem(lsKey);
-            const localEmpty =
-              !localRaw ||
-              localRaw === '[]' ||
-              localRaw === 'null' ||
-              localRaw === '""' ||
-              localRaw === '{}';
-            if (localEmpty) {
-              save(lsKey, serverValue);
-              if (key === 'orders' && Array.isArray(serverValue)) {
-                setOrders(normalizeOrders(serverValue));
-              }
-              if (key === 'products') setProducts(serverValue);
+            const serverRaw = JSON.stringify(serverValue);
+            // 로그인 시에는 서버를 기준으로 복원한다. 이전 기기의 오래된
+            // localStorage가 서버의 최신 데이터를 덮어쓰지 않도록 한다.
+            save(lsKey, serverValue);
+            lastSyncedRef.current[key] = serverRaw;
+            if (key === 'orders' && Array.isArray(serverValue)) {
+              setOrders(normalizeOrders(serverValue));
+            }
+            if (key === 'products') setProducts(serverValue);
+            if (key === 'customers') setCustomersRefresh((v) => v + 1);
+            if (key === 'gallery' || key === 'gallery_notice') {
+              setGalleryRefresh((v) => v + 1);
             }
           }
         }
@@ -276,8 +387,10 @@ export default function App() {
       } finally {
         if (alive) setBooted(true);
       }
-      // URL 자가등록으로 접수된 고객을 고객관리에 병합
-      await mergeCustomerIntake();
+      // URL 자가등록으로 접수된 고객을 고객관리/주문 목록에 병합
+      await mergeCustomerIntake(appendIntakeOrders);
+      // 결제 완료된 주문을 완납 처리
+      await syncPayments();
     })();
     return () => {
       alive = false;
@@ -305,8 +418,10 @@ export default function App() {
       }
     }
     // 사용 중에도 새로 접수된 고객을 주기적으로 병합
-    await mergeCustomerIntake();
-  }, [orders, products]);
+    await mergeCustomerIntake(appendIntakeOrders);
+    // 결제 완료된 주문을 주기적으로 완납 처리
+    await syncPayments();
+  }, [orders, products, syncPayments]);
 
   useEffect(() => {
     const timer = setInterval(syncNow, 10000);
@@ -319,6 +434,140 @@ export default function App() {
       window.removeEventListener('beforeunload', flush);
     };
   }, [syncNow]);
+
+  // 데이터가 바뀌면 10초 주기를 기다리지 않고 0.6초 안에 서버로 즉시 저장
+  useEffect(() => {
+    const t = setTimeout(() => { syncNow(); }, 600);
+    return () => clearTimeout(t);
+  }, [syncNow]);
+
+  // ===== 서버 실시간 동기화 (SSE) =====
+  // 다른 기기에서 저장·수정한 내용, 공개폼 접수, 카드 결제 완료를
+  // 새로고침 없이 즉시 화면에 반영한다.
+  const ordersRef = useRef(orders);
+  useEffect(() => { ordersRef.current = orders; }, [orders]);
+  const productsRef = useRef(products);
+  useEffect(() => { productsRef.current = products; }, [products]);
+
+  // 다른 기기에서 고객/갤러리 데이터가 바뀌었을 때 해당 화면을 갱신하는 신호
+  const [customersRefresh, setCustomersRefresh] = useState(0);
+  const [galleryRefresh, setGalleryRefresh] = useState(0);
+
+  // ===== 현장수령 예약시간 알림 =====
+  // - 수령 날짜가 없거나 준비일로 남아 있으면 '오늘'로 간주해서
+  //   사용자가 원하는 팝업 알림이 확실히 뜨도록 한다.
+  // - 알림은 1시간 이내에 한 번만, 앱 화면 배너 + 시스템 알림으로 표시.
+  const [pickupAlerts, setPickupAlerts] = useState<{ id: string; name: string; time: string }[]>([]);
+  const notifiedRef = useRef<Set<string>>(new Set(load<string[]>('jc_notified_v1', [])));
+
+  useEffect(() => {
+    function check() {
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+        now.getDate()
+      ).padStart(2, '0')}`;
+      const found: { id: string; name: string; time: string }[] = [];
+      for (const o of ordersRef.current) {
+        if (o.status !== '현장수령' || !o.reservationTime) continue;
+        // 예약 날짜 우선, 없으면 수령일, 둘 다 유효하지 않으면 오늘로 대체
+        const rawDay = /^\d{4}-\d{2}-\d{2}$/.test(o.reservationDate || '')
+          ? o.reservationDate!
+          : /^\d{4}-\d{2}-\d{2}$/.test(o.pickupDate || '')
+            ? o.pickupDate
+            : today;
+        const target = new Date(`${rawDay}T${o.reservationTime}:00`);
+        if (isNaN(target.getTime())) continue;
+        const diff = now.getTime() - target.getTime();
+        // 예약시간이 지났고 1시간 이내인 경우에만 알림
+        if (diff < 0 || diff > 60 * 60 * 1000) continue;
+        const key = `${o.id}:${rawDay}:${o.reservationTime}`;
+        if (notifiedRef.current.has(key)) continue;
+        notifiedRef.current.add(key);
+        found.push({ id: o.id, name: o.name, time: o.reservationTime });
+      }
+      if (found.length > 0) {
+        save('jc_notified_v1', [...notifiedRef.current]);
+        setPickupAlerts((prev) => [...prev, ...found]);
+        for (const a of found) {
+          // 시스템 알림 (권한이 허용된 경우) — 앱 화면 배너는 항상 표시됨
+          try {
+            if ('Notification' in window && Notification.permission === 'granted') {
+              new Notification('⏰ 현장수령 예약 시간', {
+                body: `${a.name} 고객 현장수령 예약시간(${a.time})이 되었습니다.`,
+                tag: `pickup-${a.id}`,
+              });
+            }
+          } catch { /* 미지원 환경 무시 */ }
+          try { navigator.vibrate?.([300, 100, 300]); } catch { /* 무시 */ }
+        }
+      }
+    }
+    check();
+    const timer = setInterval(check, 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  async function enableNotifications() {
+    if (!('Notification' in window)) {
+      alert('이 기기/앱에서는 시스템 알림을 지원하지 않습니다.\n앱 화면 내 알림 배너로 표시됩니다.');
+      return;
+    }
+    if (Notification.permission === 'granted') {
+      alert('알림이 이미 켜져 있습니다. 현장수령 예약시간이 되면 알림이 옵니다.');
+      return;
+    }
+    const p = await Notification.requestPermission();
+    if (p === 'granted') {
+      alert('알림이 켜졌습니다. 현장수령 예약시간이 되면 알림이 옵니다.');
+    } else {
+      alert('알림 권한이 거부되었습니다. 브라우저/앱 설정에서 알림을 허용해주세요.');
+    }
+  }
+
+  useEffect(() => {
+    if (!loggedIn) return;
+    const close = subscribeEvents((key) => {
+      if (key === 'intake') {
+        void mergeCustomerIntake(appendIntakeOrders);
+        return;
+      }
+      if (key === 'payment') {
+        void syncPayments();
+        return;
+      }
+      const lsKey = SYNC_KEYS[key];
+      if (!lsKey) return;
+      // 아직 서버로 못 보낸 로컬 수정이 있으면 덮어쓰지 않음 (다음 푸시 때 반영됨)
+      let raw: string | null = null;
+      if (key === 'orders') raw = JSON.stringify(ordersRef.current ?? []);
+      else if (key === 'products') raw = JSON.stringify(productsRef.current ?? []);
+      else raw = localStorage.getItem(lsKey);
+      if (raw != null && lastSyncedRef.current[key] !== raw) return;
+      void (async () => {
+        try {
+          const all = await fetchAllAppData();
+          if (!all) return;
+          const serverValue = (all as any)[key];
+          if (serverValue === undefined || serverValue === null) return;
+          const serverRaw = JSON.stringify(serverValue);
+          if (lastSyncedRef.current[key] === serverRaw) return;
+          lastSyncedRef.current[key] = serverRaw;
+          save(lsKey, serverValue);
+          if (key === 'orders' && Array.isArray(serverValue)) {
+            setOrders(normalizeOrders(serverValue));
+          }
+          if (key === 'products' && Array.isArray(serverValue)) {
+            setProducts(serverValue as Product[]);
+          }
+          // 고객·갤러리처럼 컴포넌트가 자체 상태를 갖는 화면은 갱신 신호를 보냄
+          if (key === 'customers') setCustomersRefresh((v) => v + 1);
+          if (key === 'gallery' || key === 'gallery_notice') setGalleryRefresh((v) => v + 1);
+        } catch { /* 무시 */ }
+      })();
+    });
+    return close;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loggedIn, appendIntakeOrders, syncPayments]);
 
   const filtered = useMemo(() => {
     const term = search.trim();
@@ -344,7 +593,10 @@ export default function App() {
     const activeOrders = orders.filter((o) => o.status !== '취소');
     const totalQuantity = activeOrders.reduce((sum, o) => sum + o.quantity, 0);
     const totalRevenue = activeOrders.reduce((sum, o) => sum + o.totalPrice, 0);
-    const totalDeposit = activeOrders.reduce((sum, o) => sum + o.depositAmount, 0);
+    const totalDeposit = activeOrders.reduce(
+      (sum, o) => sum + (o.paid ? o.totalPrice : o.depositAmount),
+      0
+    );
     const outstanding = totalRevenue - totalDeposit;
     const unpaidCount = activeOrders.filter((o) => getPaymentStatus(o) !== '완납').length;
     const byStatus = STATUS_LIST.map((s) => ({
@@ -407,13 +659,16 @@ export default function App() {
     setForm((prev) => {
       const quantity =
         customer.quantity && customer.quantity > 0 ? customer.quantity : prev.quantity;
+      const nextPickup = customer.arrivalDate || prev.pickupDate;
       return {
         ...prev,
         name: customer.name,
         phone: customer.phone,
         address: customer.address,
         memo: customer.memo || prev.memo,
-        pickupDate: customer.arrivalDate || prev.pickupDate,
+        pickupDate: nextPickup,
+        // 고객 선택으로 희망일이 채워지면 준비일도 함께 자동 설정 (4일 전)
+        preparationDate: prev.preparationDate || calcPreparationDate(nextPickup),
         quantity,
         totalPrice: calcTotal(quantity, prev.pricePerUnit),
       };
@@ -642,7 +897,8 @@ export default function App() {
         depositAmount: deposit ? totalPrice : 0,
         pickup,
         pickupDate,
-        preparationDate: '',
+        // 엑셀 등록 시에도 희망일 기준 준비일 자동 설정 (4일 전)
+        preparationDate: calcPreparationDate(pickupDate),
         address,
         memo: memo || timeText || '',
         status,
@@ -689,7 +945,7 @@ export default function App() {
         return;
       }
       const script = document.createElement('script');
-      script.src = '//t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js';
+      script.src = 'https://t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js';
       script.async = true;
       script.onload = () => resolve(window.daum);
       script.onerror = () => reject(new Error('주소 검색 스크립트를 불러오지 못했습니다.'));
@@ -697,25 +953,38 @@ export default function App() {
     });
   }
 
-  async function openPostcode() {
-    try {
-      const daum = await loadPostcodeScript();
-      setIsPostcodeOpen(true);
-      setTimeout(() => {
-        if (!postcodeWrapRef.current) return;
+  function openPostcode() {
+    setIsPostcodeOpen(true);
+  }
+
+  useEffect(() => {
+    if (!isPostcodeOpen) return;
+    let cancelled = false;
+    loadPostcodeScript()
+      .then((daum) => {
+        if (cancelled || !postcodeWrapRef.current) return;
         new daum.Postcode({
           width: '100%',
           height: '100%',
           oncomplete: (data: any) => {
-            setForm((prev) => ({ ...prev, address: data.address }));
+            setForm((prev) => ({
+              ...prev,
+              address: data.roadAddress || data.jibunAddress || data.address || '',
+            }));
             setIsPostcodeOpen(false);
           },
         }).embed(postcodeWrapRef.current);
-      }, 0);
-    } catch (err) {
-      alert('주소 검색을 불러오는 중 오류가 발생했습니다.');
-    }
-  }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setIsPostcodeOpen(false);
+          alert('주소 검색을 불러오는 중 오류가 발생했습니다.');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isPostcodeOpen]);
 
   async function copyOrderUrl(order: Order) {
     const url = getOrderPublicUrl(order.id);
@@ -858,6 +1127,13 @@ export default function App() {
             <button className='btn' onClick={handleLogout}>
               로그아웃
             </button>
+            <button
+              className='btn'
+              onClick={enableNotifications}
+              title='현장수령 예약시간 알림 켜기'
+            >
+              🔔 알림
+            </button>
             {isAdmin() && (
               <button
                 className='btn'
@@ -869,6 +1145,31 @@ export default function App() {
             )}
           </div>
         </header>
+
+        {pickupAlerts.length > 0 && (
+          <div className='pickup-alert-banner' role='alert'>
+            <span>
+              ⏰ <strong>{pickupAlerts[0].name}</strong> 고객 현장수령 예약시간(
+              {pickupAlerts[0].time})이 되었습니다.
+              {pickupAlerts.length > 1 ? ` 외 ${pickupAlerts.length - 1}건` : ''}
+            </span>
+            <button className='btn' onClick={() => setPickupAlerts([])}>
+              확인
+            </button>
+          </div>
+        )}
+
+        {isAdmin() && mustChangePassword() && (
+          <div className='security-banner' role='alert'>
+            <span>
+              ⚠ 관리자 계정이 기본 비밀번호(0000)를 사용 중입니다. 외부에 공개된 서버이므로
+              지금 바로 변경해주세요.
+            </span>
+            <button className='btn' onClick={() => setPage('admin')}>
+              비밀번호 변경하기
+            </button>
+          </div>
+        )}
 
         {isAccountModalOpen && (
           <div
@@ -893,9 +1194,9 @@ export default function App() {
         {page === 'dashboard' ? (
           <Dashboard orders={orders} products={products} onNavigate={(p) => setPage(p)} />
         ) : page === 'customers' && isAdmin() ? (
-          <Customers orders={orders} />
+          <Customers orders={orders} refreshSignal={customersRefresh} />
         ) : page === 'gallery' && isAdmin() ? (
-          <Gallery />
+          <Gallery refreshSignal={galleryRefresh} />
         ) : page === 'admin' && isAdmin() ? (
           <Admin />
         ) : (
@@ -1119,17 +1420,19 @@ export default function App() {
                         value={form.pickupDate}
                         onChange={(e) => {
                           const pickupDate = e.target.value;
-                          // 희망일 입력 시 준비일 자동 설정 (4일 전)
-                          const preparationDate = pickupDate
-                            ? new Date(new Date(pickupDate).getTime() - 4 * 86400000)
-                                .toISOString()
-                                .slice(0, 10)
-                            : '';
-                          setForm((prev) => ({
-                            ...prev,
-                            pickupDate,
-                            preparationDate: preparationDate || prev.preparationDate,
-                          }));
+                          setForm((prev) => {
+                            // 희망일 변경 시 준비일 자동 갱신 (4일 전)
+                            // 단, 사용자가 준비일을 직접 수정한 값이면 덮어쓰지 않음
+                            const auto = calcPreparationDate(pickupDate);
+                            const prevAuto = calcPreparationDate(prev.pickupDate || '');
+                            const wasAutoOrEmpty =
+                              !prev.preparationDate || prev.preparationDate === prevAuto;
+                            return {
+                              ...prev,
+                              pickupDate,
+                              preparationDate: wasAutoOrEmpty ? auto : prev.preparationDate,
+                            };
+                          });
                         }}
                       />
                     </label>
@@ -1608,6 +1911,7 @@ function OrderPhotoModal({
 }) {
   const [photos, setPhotos] = useState<string[]>(order.completionPhotos || []);
   const [saving, setSaving] = useState(false);
+  const [progress, setProgress] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
   async function handleSelect(e: React.ChangeEvent<HTMLInputElement>) {
@@ -1624,9 +1928,19 @@ function OrderPhotoModal({
       alert(`최대 ${maxPhotos}장까지 가능하여 ${remaining}장만 추가됩니다.`);
     }
     try {
-      const compressed = await Promise.all(targets.map((f) => compressImage(f)));
-      setPhotos((prev) => [...prev, ...compressed]);
+      // 한 장씩 순차 처리 (스마트폰에서 동시 처리 시 메모리 부족으로 실패하는 것 방지)
+      const { images, errors } = await compressImages(targets, (done, total) =>
+        setProgress(`사진 처리 중... (${done}/${total})`)
+      );
+      setProgress('');
+      if (images.length > 0) {
+        setPhotos((prev) => [...prev, ...images]);
+      }
+      if (errors.length > 0) {
+        alert(`일부 사진을 등록하지 못했습니다.\n${errors.join('\n')}`);
+      }
     } catch (err: any) {
+      setProgress('');
       alert(err.message || '이미지를 처리하는 중 오류가 발생했습니다.');
     }
   }
@@ -1658,6 +1972,7 @@ function OrderPhotoModal({
           {order.name} · {order.cabbageType} {order.quantity}
           {order.unit} (최대 {maxPhotos}장)
         </p>
+        {progress && <p className='photo-modal-sub'>{progress}</p>}
         <div className='photo-grid modal-grid'>
           {photos.map((photo, idx) => (
             <div key={idx} className='photo-item'>
@@ -1749,6 +2064,9 @@ function StatusDetailEditor({
 }) {
   const [courier, setCourier] = useState(order.courier || '');
   const [trackingNumber, setTrackingNumber] = useState(order.trackingNumber || '');
+  const [reservationDate, setReservationDate] = useState(
+    order.reservationDate || order.pickupDate || ''
+  );
   const [reservationTime, setReservationTime] = useState(order.reservationTime || '');
   const [statusMemo, setStatusMemo] = useState(order.statusMemo || '');
 
@@ -1786,15 +2104,26 @@ function StatusDetailEditor({
             </label>
           </>
         ) : (
-          <label>
-            예약시간
-            <input
-              className='input'
-              type='time'
-              value={reservationTime}
-              onChange={(e) => setReservationTime(e.target.value)}
-            />
-          </label>
+          <>
+            <label>
+              예약 날짜
+              <input
+                className='input'
+                type='date'
+                value={reservationDate}
+                onChange={(e) => setReservationDate(e.target.value)}
+              />
+            </label>
+            <label>
+              예약 시간
+              <input
+                className='input'
+                type='time'
+                value={reservationTime}
+                onChange={(e) => setReservationTime(e.target.value)}
+              />
+            </label>
+          </>
         )}
         <label className='full'>
           메모
@@ -1814,7 +2143,7 @@ function StatusDetailEditor({
             onSave(
               mode === '택배'
                 ? { courier, trackingNumber, statusMemo }
-                : { reservationTime, statusMemo }
+                : { reservationDate, reservationTime, statusMemo }
             )
           }
         >
@@ -1848,7 +2177,7 @@ function CustomerIntakeView() {
         return;
       }
       const script = document.createElement('script');
-      script.src = '//t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js';
+      script.src = 'https://t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js';
       script.async = true;
       script.onload = () => resolve(window.daum);
       script.onerror = () => reject(new Error('주소 검색 스크립트를 불러오지 못했습니다.'));
@@ -1856,30 +2185,56 @@ function CustomerIntakeView() {
     });
   }
 
-  async function openPostcode() {
-    try {
-      const daum = await loadPostcodeScript();
-      setIsPostcodeOpen(true);
-      setTimeout(() => {
-        if (!postcodeWrapRef.current) return;
+  function openPostcode() {
+    setIsPostcodeOpen(true);
+  }
+
+  useEffect(() => {
+    if (!isPostcodeOpen) return;
+    let cancelled = false;
+    loadPostcodeScript()
+      .then((daum) => {
+        if (cancelled || !postcodeWrapRef.current) return;
         new daum.Postcode({
           width: '100%',
           height: '100%',
           oncomplete: (data: any) => {
-            setForm((prev) => ({ ...prev, address: data.address }));
+            setForm((prev) => ({
+              ...prev,
+              address: data.roadAddress || data.jibunAddress || data.address || '',
+            }));
             setIsPostcodeOpen(false);
           },
         }).embed(postcodeWrapRef.current);
-      }, 0);
-    } catch {
-      alert('주소 검색을 불러오는 중 오류가 발생했습니다.');
-    }
-  }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setIsPostcodeOpen(false);
+          alert('주소 검색을 불러오는 중 오류가 발생했습니다.');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isPostcodeOpen]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (!form.name.trim()) {
+      alert('고객명을 입력해주세요.');
+      return;
+    }
     if (!form.phone.trim()) {
       alert('연락처를 입력해주세요.');
+      return;
+    }
+    if (!form.arrivalDate) {
+      alert('도착 예정일을 선택해주세요.');
+      return;
+    }
+    const quantity = Number(form.quantity);
+    if (!form.quantity.trim() || !Number.isInteger(quantity) || quantity <= 0) {
+      alert('수량을 1개 이상 입력해주세요.');
       return;
     }
     setSubmitting(true);
@@ -1890,7 +2245,7 @@ function CustomerIntakeView() {
         address: form.address.trim(),
         memo: form.memo.trim(),
         arrivalDate: form.arrivalDate || undefined,
-        quantity: form.quantity ? Number(form.quantity) : undefined,
+        quantity,
         receiveMethod,
       });
       setDone(true);
@@ -1924,17 +2279,18 @@ function CustomerIntakeView() {
         <section className='panel form-panel'>
           <h2>고객 정보 등록</h2>
           <p className='panel-hint'>
-            아래 양식을 입력하고 [완료] 버튼을 눌러주세요. 연락처는 필수이며 나머지는 선택사항입니다.
+            아래 양식을 입력하고 [완료] 버튼을 눌러주세요. 고객명, 연락처, 도착 예정일, 수량은 필수입니다.
           </p>
           <form onSubmit={handleSubmit}>
             <div className='form-grid'>
               <label>
-                고객명 (선택)
+                고객명
                 <input
                   className='input'
+                  required
                   value={form.name}
                   onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  placeholder='미입력 가능'
+                  placeholder='고객명'
                 />
               </label>
               <label>
@@ -1949,20 +2305,23 @@ function CustomerIntakeView() {
                 />
               </label>
               <label>
-                도착 예정일 (선택)
+                도착 예정일
                 <input
                   className='input'
                   type='date'
+                  required
                   value={form.arrivalDate}
                   onChange={(e) => setForm({ ...form, arrivalDate: e.target.value })}
                 />
               </label>
               <label>
-                수량 (선택)
+                수량
                 <input
                   className='input'
                   type='number'
-                  min={0}
+                  required
+                  min={1}
+                  step={1}
                   value={form.quantity}
                   onChange={(e) => setForm({ ...form, quantity: e.target.value })}
                   placeholder='주문 수량'
@@ -2041,9 +2400,64 @@ function CustomerIntakeView() {
   );
 }
 
+// 토스페이먼츠 클라이언트 키 — 실결제 전환 시 라이브 키로 교체
+const TOSS_CLIENT_KEY = 'test_ck_D5GePWvyJnrK0W0k6q8gLzN97Eoq';
+
+function loadTossScript(): Promise<any> {
+  return new Promise((resolve, reject) => {
+    if ((window as any).TossPayments) {
+      resolve((window as any).TossPayments);
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://js.tosspayments.com/v2/standard';
+    script.async = true;
+    script.onload = () => resolve((window as any).TossPayments);
+    script.onerror = () => reject(new Error('결제 모듈을 불러오지 못했습니다.'));
+    document.head.appendChild(script);
+  });
+}
+
 function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?: Order }) {
   const [order, setOrder] = useState<Order | undefined>(localOrder);
   const [checked, setChecked] = useState(false);
+  const [payMessage, setPayMessage] = useState<{ kind: 'info' | 'error'; text: string } | null>(null);
+  const [payLoading, setPayLoading] = useState(false);
+
+  // 결제 완료/실패 후 리다이렉트 처리 (토스가 URL에 결과 파라미터를 붙여 돌려볼냄)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const paymentKey = params.get('paymentKey');
+    const payOrderId = params.get('orderId');
+    const amount = Number(params.get('amount'));
+    const failMessage = params.get('message');
+    const cleanUrl = () => {
+      const url = new URL(window.location.href);
+      ['paymentKey', 'orderId', 'amount', 'code', 'message', 'paymentType'].forEach((k) =>
+        url.searchParams.delete(k)
+      );
+      window.history.replaceState({}, '', url.toString());
+    };
+    if (paymentKey && payOrderId === orderId && amount > 0) {
+      setPayLoading(true);
+      setPayMessage({ kind: 'info', text: '결제를 확인하는 중입니다...' });
+      confirmPublicPayment(paymentKey, payOrderId, amount)
+        .then(async () => {
+          cleanUrl();
+          setPayMessage({ kind: 'info', text: '결제가 완료되었습니다. 감사합니다.' });
+          const remote = await fetchPublicOrder(orderId).catch(() => null);
+          if (remote) setOrder(remote);
+        })
+        .catch((err) => {
+          cleanUrl();
+          setPayMessage({ kind: 'error', text: err?.message || '결제 승인에 실패했습니다.' });
+        })
+        .finally(() => setPayLoading(false));
+    } else if (failMessage) {
+      setPayMessage({ kind: 'error', text: `결제가 취소되었습니다. (${failMessage})` });
+      cleanUrl();
+    }
+  }, [orderId]);
 
   // 서버에서 주문 스냅샷을 폴링하여 진행 상황을 실시간 표시
   useEffect(() => {
@@ -2064,6 +2478,31 @@ function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?
       clearInterval(timer);
     };
   }, [orderId]);
+
+  async function handlePay(balance: number) {
+    if (!order) return;
+    setPayLoading(true);
+    try {
+      const TossPayments = await loadTossScript();
+      const toss = TossPayments(TOSS_CLIENT_KEY);
+      const payment = toss.payment({ customerKey: TossPayments.ANONYMOUS });
+      const url = new URL(window.location.origin + window.location.pathname);
+      url.searchParams.set('order', orderId);
+      await payment.requestPayment({
+        method: 'CARD',
+        amount: { currency: 'KRW', value: balance },
+        orderId,
+        orderName: `${order.cabbageType} ${order.quantity}${order.unit}`,
+        successUrl: url.toString(),
+        failUrl: url.toString(),
+        customerName: order.name,
+        customerMobilePhone: order.phone ? order.phone.replace(/\D/g, '') : undefined,
+      });
+    } catch {
+      setPayLoading(false);
+      setPayMessage({ kind: 'error', text: '결제 창을 여는 중 오류가 발생했습니다.' });
+    }
+  }
 
   if (!order) {
     return (
@@ -2184,8 +2623,11 @@ function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?
             )}
             {order.reservationTime && (
               <div className='info-row'>
-                <span>예약시간</span>
-                <span>{order.reservationTime}</span>
+                <span>예약일시</span>
+                <span>
+                  {order.reservationDate ? `${order.reservationDate} ` : ''}
+                  {order.reservationTime}
+                </span>
               </div>
             )}
             {order.statusMemo && (
@@ -2202,9 +2644,38 @@ function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?
             )}
             <div className='info-row'>
               <span>입금상태</span>
-              <span>{getPaymentStatus(order)}</span>
+              <span>{order.paid ? '완납 (카드결제)' : getPaymentStatus(order)}</span>
             </div>
           </div>
+
+          {payMessage && (
+            <div className={`pay-message ${payMessage.kind === 'error' ? 'pay-message-error' : ''}`}>
+              {payMessage.text}
+            </div>
+          )}
+
+          {order.paid ? (
+            <div className='pay-complete-box'>
+              <strong>결제 완료</strong>
+              <span>
+                {formatCurrency(order.paidAmount ?? order.totalPrice)}
+                {order.paymentMethod ? ` · ${order.paymentMethod}` : ' · 카드'}
+                {order.paidAt ? ` · ${formatDate(order.paidAt)}` : ''}
+              </span>
+            </div>
+          ) : (
+            balance > 0 &&
+            order.status !== '취소' && (
+              <button
+                type='button'
+                className='pay-button'
+                disabled={payLoading}
+                onClick={() => handlePay(balance)}
+              >
+                {payLoading ? '결제 준비 중...' : `💳 잔액 결제하기 ${formatCurrency(balance)}`}
+              </button>
+            )
+          )}
 
           {order.status === '완료' && (order.completionPhotos || []).length > 0 && (
             <div className='public-photos'>

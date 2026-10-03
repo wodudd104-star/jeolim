@@ -61,8 +61,14 @@ function getCell(row: Record<string, any>, keys: string[]): string {
   return '';
 }
 
-export default function Customers({ orders }: { orders: Order[] }) {
+export default function Customers({ orders, refreshSignal }: { orders: Order[]; refreshSignal?: number }) {
   const [customers, setCustomers] = useState<Customer[]>(() => loadCustomers());
+
+  // 다른 기기에서 고객 정보가 저장·수정되면(SSE) 화면을 새로고침 없이 갱신
+  useEffect(() => {
+    if (refreshSignal === undefined) return;
+    setCustomers(loadCustomers());
+  }, [refreshSignal]);
   const [search, setSearch] = useState('');
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -306,7 +312,7 @@ export default function Customers({ orders }: { orders: Order[] }) {
         return;
       }
       const script = document.createElement('script');
-      script.src = '//t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js';
+      script.src = 'https://t1.daumcdn.net/mapjsapi/bundle/postcode/prod/postcode.v2.js';
       script.async = true;
       script.onload = () => resolve(window.daum);
       script.onerror = () => reject(new Error('주소 검색 스크립트를 불러오지 못했습니다.'));
@@ -314,30 +320,38 @@ export default function Customers({ orders }: { orders: Order[] }) {
     });
   }
 
-  async function openPostcode() {
-    try {
-      const daum = await loadPostcodeScript();
-      setIsPostcodeOpen(true);
-      setTimeout(() => {
-        if (!postcodeWrapRef.current) return;
+  function openPostcode() {
+    setIsPostcodeOpen(true);
+  }
+
+  useEffect(() => {
+    if (!isPostcodeOpen) return;
+    let cancelled = false;
+    loadPostcodeScript()
+      .then((daum) => {
+        if (cancelled || !postcodeWrapRef.current) return;
         new daum.Postcode({
           width: '100%',
           height: '100%',
           oncomplete: (data: any) => {
-            setForm((prev) => ({ ...prev, address: data.address }));
+            setForm((prev) => ({
+              ...prev,
+              address: data.roadAddress || data.jibunAddress || data.address || '',
+            }));
             setIsPostcodeOpen(false);
           },
-          onresize: () => {
-            if (postcodeWrapRef.current) {
-              postcodeWrapRef.current.style.height = '100%';
-            }
-          },
         }).embed(postcodeWrapRef.current);
-      }, 0);
-    } catch (err) {
-      alert('주소 검색을 불러오는 중 오류가 발생했습니다.');
-    }
-  }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setIsPostcodeOpen(false);
+          alert('주소 검색을 불러오는 중 오류가 발생했습니다.');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isPostcodeOpen]);
 
   return (
     <div className='customer-shell'>

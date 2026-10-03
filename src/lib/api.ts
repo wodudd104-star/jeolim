@@ -8,6 +8,31 @@ function getHeaders(): Record<string, string> {
   return { 'Content-Type': 'application/json' };
 }
 
+// ===== 실시간 동기화(SSE) 기기 식별자 =====
+// 같은 기기에서 보낸 변경 알림을 서버가 되돌려 보내지 않도록 구분하는 용도.
+const CLIENT_ID_KEY = 'jc_client_id';
+
+export function getClientId(): string {
+  let id = sessionStorage.getItem(CLIENT_ID_KEY);
+  if (!id) {
+    id = `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    sessionStorage.setItem(CLIENT_ID_KEY, id);
+  }
+  return id;
+}
+
+// 서버의 실시간 변경 이벤트 구독. 반환값은 구독 해제 함수.
+export function subscribeEvents(onChange: (key: string) => void): () => void {
+  const es = new EventSource(getUrl(`/api/events?clientId=${encodeURIComponent(getClientId())}`));
+  es.addEventListener('data-changed', (e) => {
+    try {
+      const data = JSON.parse((e as MessageEvent).data);
+      if (data && typeof data.key === 'string') onChange(data.key);
+    } catch { /* 무시 */ }
+  });
+  return () => es.close();
+}
+
 export async function fetchAllAppData(): Promise<Record<string, unknown> | null> {
   const res = await fetch(getUrl('/api/data/all'), {
     credentials: 'include',
@@ -19,7 +44,7 @@ export async function fetchAllAppData(): Promise<Record<string, unknown> | null>
 export async function syncAppData(key: string, value: unknown) {
   const res = await fetch(getUrl(`/api/data/${encodeURIComponent(key)}`), {
     method: 'PUT',
-    headers: getHeaders(),
+    headers: { ...getHeaders(), 'x-client-id': getClientId() },
     body: JSON.stringify(value),
     credentials: 'include',
     keepalive: true,
@@ -38,7 +63,7 @@ async function throwIfFailed(res: Response, fallback: string) {
 export async function syncPublicOrder(order: unknown) {
   const res = await fetch(getUrl(`/api/public/order/${encodeURIComponent((order as any).id)}`), {
     method: 'PUT',
-    headers: getHeaders(),
+    headers: { ...getHeaders(), 'x-client-id': getClientId() },
     body: JSON.stringify(order),
     credentials: 'include',
   });
@@ -54,10 +79,31 @@ export async function fetchPublicOrder(id: string) {
   return res.json();
 }
 
+export async function confirmPublicPayment(paymentKey: string, orderId: string, amount: number) {
+  const res = await fetch(getUrl('/api/public/payment/confirm'), {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ paymentKey, orderId, amount }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || '결제 승인에 실패했습니다.');
+  return data as { ok: boolean; already?: boolean };
+}
+
+export async function fetchPublicPayments() {
+  const res = await fetch(getUrl('/api/payments/public-orders'), {
+    credentials: 'include',
+  });
+  if (!res.ok) return [];
+  return res.json() as Promise<
+    Array<{ id: string; paidAt?: string; paidAmount?: number; paymentMethod?: string }>
+  >;
+}
+
 export async function syncPublicGallery(items: unknown[], notice: string) {
   const res = await fetch(getUrl('/api/public/gallery'), {
     method: 'PUT',
-    headers: getHeaders(),
+    headers: { ...getHeaders(), 'x-client-id': getClientId() },
     body: JSON.stringify({ items, notice }),
     credentials: 'include',
   });
@@ -134,7 +180,7 @@ export async function login(id: string, password: string) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '로그인 실패');
-  return data as { id: string; email: string; role: string; active: boolean };
+  return data as { id: string; email: string; role: string; active: boolean; mustChangePassword?: boolean };
 }
 
 export async function logout() {
@@ -153,14 +199,14 @@ export async function me() {
   });
   const data = await res.json().catch(() => null);
   if (!res.ok) return null;
-  return data as { id: string; email: string; role: string; active: boolean };
+  return data as { id: string; email: string; role: string; active: boolean; mustChangePassword?: boolean };
 }
 
-export async function registerAccount(id: string, password: string, email: string) {
+export async function registerAccount(id: string, password: string, email: string, phone: string) {
   const res = await fetch(getUrl('/api/register'), {
     method: 'POST',
     headers: getHeaders(),
-    body: JSON.stringify({ id, password, email }),
+    body: JSON.stringify({ id, password, email, phone }),
     credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));
@@ -174,7 +220,7 @@ export async function fetchUsers() {
   });
   const data = await res.json().catch(() => []);
   if (!res.ok) throw new Error(data.error || '사용자 목록 조회 실패');
-  return data as { id: string; email: string; role: string; active: boolean; createdAt: string }[];
+  return data as { id: string; email: string; phone?: string; role: string; active: boolean; createdAt: string }[];
 }
 
 export async function activateUser(id: string) {
@@ -227,6 +273,18 @@ export async function deleteUser(id: string) {
   return data;
 }
 
+export async function resetUserPassword(id: string, newPassword?: string) {
+  const res = await fetch(getUrl(`/api/users/${encodeURIComponent(id)}/reset-password`), {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify({ newPassword: newPassword || '' }),
+    credentials: 'include',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || '비밀번호 초기화 실패');
+  return data as { success: boolean; tempPassword: string; smsSent?: boolean; smsNote?: string };
+}
+
 export async function findIdByEmail(email: string) {
   const res = await fetch(getUrl('/api/find-id'), {
     method: 'POST',
@@ -263,11 +321,11 @@ export async function resetPassword(email: string, code: string, newPassword: st
   return data;
 }
 
-export async function createUser(id: string, password: string, email: string, role: string, active: boolean) {
+export async function createUser(id: string, password: string, email: string, phone: string, role: string, active: boolean) {
   const res = await fetch(getUrl('/api/users'), {
     method: 'POST',
     headers: getHeaders(),
-    body: JSON.stringify({ id, password, email, role, active }),
+    body: JSON.stringify({ id, password, email, phone, role, active }),
     credentials: 'include',
   });
   const data = await res.json().catch(() => ({}));

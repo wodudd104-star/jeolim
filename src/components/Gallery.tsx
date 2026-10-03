@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { GalleryItem } from '../types';
 import { load, save } from '../lib/storage';
-import { compressImage, saveSafely } from '../lib/images';
+import { compressImages, saveSafely } from '../lib/images';
 import { syncPublicGallery, fetchPublicGallery } from '../lib/api';
 
 const GALLERY_KEY = 'jc_gallery_v1';
@@ -80,13 +80,20 @@ export function PublicGallery() {
   );
 }
 
-export default function Gallery() {
+export default function Gallery({ refreshSignal }: { refreshSignal?: number }) {
   const [items, setItems] = useState<GalleryItem[]>(() => loadGallery());
   const [notice, setNotice] = useState(() => loadGalleryNotice());
   const inputRef = useRef<HTMLInputElement>(null);
   const [copied, setCopied] = useState(false);
   const [generatedUrl, setGeneratedUrl] = useState('');
   const [generating, setGenerating] = useState(false);
+
+  // 다른 기기에서 사진/공지가 저장·수정되면(SSE) 새로고침 없이 갱신
+  React.useEffect(() => {
+    if (refreshSignal === undefined) return;
+    setItems(loadGallery());
+    setNotice(loadGalleryNotice());
+  }, [refreshSignal]);
 
   function commitItems(next: GalleryItem[]) {
     setItems(next);
@@ -114,13 +121,19 @@ export default function Gallery() {
       alert(`최대 ${MAX_GALLERY_PHOTOS}장까지 가능하여 ${remaining}장만 추가됩니다.`);
     }
     try {
-      const compressed = await Promise.all(targets.map((f) => compressImage(f)));
-      const newItems: GalleryItem[] = compressed.map((image) => ({
-        id: crypto.randomUUID(),
-        image,
-        note: '',
-      }));
-      commitItems([...items, ...newItems]);
+      // 한 장씩 순차 처리 (스마트폰에서 동시 처리 시 메모리 부족으로 실패하는 것 방지)
+      const { images, errors } = await compressImages(targets);
+      if (images.length > 0) {
+        const newItems: GalleryItem[] = images.map((image) => ({
+          id: crypto.randomUUID(),
+          image,
+          note: '',
+        }));
+        commitItems([...items, ...newItems]);
+      }
+      if (errors.length > 0) {
+        alert(`일부 사진을 등록하지 못했습니다.\n${errors.join('\n')}`);
+      }
     } catch (err: any) {
       alert(err.message || '이미지를 처리하는 중 오류가 발생했습니다.');
     } finally {

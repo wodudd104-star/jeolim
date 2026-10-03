@@ -13,6 +13,7 @@ import {
 const AUTH_SESSION_KEY = 'jc_auth_session';
 const AUTH_ROLE_KEY = 'jc_auth_role';
 const AUTH_USER_KEY = 'jc_auth_user_v1';
+const MUST_CHANGE_PW_KEY = 'jc_must_change_pw';
 
 export type AuthUser = {
   id: string;
@@ -24,10 +25,19 @@ export function isLoggedIn() {
   return sessionStorage.getItem(AUTH_SESSION_KEY) === '1';
 }
 
+export function mustChangePassword(): boolean {
+  return sessionStorage.getItem(MUST_CHANGE_PW_KEY) === '1';
+}
+
+export function clearMustChangePassword() {
+  sessionStorage.removeItem(MUST_CHANGE_PW_KEY);
+}
+
 export async function performLogout() {
   sessionStorage.removeItem(AUTH_SESSION_KEY);
   sessionStorage.removeItem(AUTH_ROLE_KEY);
   sessionStorage.removeItem(AUTH_USER_KEY);
+  sessionStorage.removeItem(MUST_CHANGE_PW_KEY);
   try {
     await logout();
   } catch {
@@ -83,6 +93,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
   const [signupPassword, setSignupPassword] = useState('');
   const [signupConfirm, setSignupConfirm] = useState('');
   const [signupEmail, setSignupEmail] = useState('');
+  const [signupPhone, setSignupPhone] = useState('');
 
   // 찾기
   const [findType, setFindType] = useState<'id' | 'password'>('id');
@@ -102,6 +113,11 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       if (user) {
         sessionStorage.setItem(AUTH_SESSION_KEY, '1');
         sessionStorage.setItem(AUTH_ROLE_KEY, user.role === 'admin' ? 'admin' : 'user');
+        if (user.mustChangePassword) {
+          sessionStorage.setItem(MUST_CHANGE_PW_KEY, '1');
+        } else {
+          sessionStorage.removeItem(MUST_CHANGE_PW_KEY);
+        }
         setStoredUser({ id: user.id, role: user.role, email: user.email });
         onLogin();
       }
@@ -138,6 +154,11 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       const user = await login(id, password);
       sessionStorage.setItem(AUTH_SESSION_KEY, '1');
       sessionStorage.setItem(AUTH_ROLE_KEY, user.role === 'admin' ? 'admin' : 'user');
+      if (user.mustChangePassword) {
+        sessionStorage.setItem(MUST_CHANGE_PW_KEY, '1');
+      } else {
+        sessionStorage.removeItem(MUST_CHANGE_PW_KEY);
+      }
       setStoredUser({ id: user.id, role: user.role, email: user.email });
       onLogin();
     } catch (err: any) {
@@ -167,8 +188,13 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       setError(emailErr);
       return;
     }
+    const phoneDigits = signupPhone.replace(/[^0-9]/g, '');
+    if (!/^01[016789][0-9]{7,8}$/.test(phoneDigits)) {
+      setError('올바른 핸드폰번호를 입력해주세요. (예: 01012345678)');
+      return;
+    }
     try {
-      await registerAccount(signupId, signupPassword, signupEmail);
+      await registerAccount(signupId, signupPassword, signupEmail, phoneDigits);
       setSuccess('회원가입 신청이 완료되었습니다. 관리자 승인 후 로그인 가능합니다.');
       setMode('login');
       setId(signupId);
@@ -176,6 +202,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       setSignupPassword('');
       setSignupConfirm('');
       setSignupEmail('');
+      setSignupPhone('');
     } catch (err: any) {
       setError(err.message || '회원가입 중 오류가 발생했습니다.');
     }
@@ -193,11 +220,11 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
     try {
       if (findType === 'id') {
         await findIdByEmail(findEmail);
-        setSuccess('아이디를 이메일로 발송했습니다. 메일함을 확인해주세요.');
+        setSuccess('등록된 이메일이라면 아이디 안내 메일이 발송됩니다. 메일함을 확인해주세요.');
       } else {
         await sendResetCode(findEmail);
         setCodeSent(true);
-        setSuccess('인증번호를 이메일로 발송했습니다. 메일함을 확인해주세요.');
+        setSuccess('등록된 이메일이라면 인증번호가 발송됩니다. 메일함을 확인해주세요.');
       }
     } catch (err: any) {
       setError(err.message || '이메일 발송 중 오류가 발생했습니다.');
@@ -331,6 +358,14 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
               value={signupEmail}
               onChange={(e) => setSignupEmail(e.target.value)}
               autoComplete='email'
+            />
+            <input
+              type='tel'
+              className='input'
+              placeholder='핸드폰번호 (비밀번호 초기화 문자 수신용)'
+              value={signupPhone}
+              onChange={(e) => setSignupPhone(e.target.value)}
+              autoComplete='tel'
             />
             {error && <p className='login-error'>{error}</p>}
             {success && <p className='login-success'>{success}</p>}

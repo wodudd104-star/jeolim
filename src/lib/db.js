@@ -44,6 +44,7 @@ export async function ensureUsersTable() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  await db.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(20)');
 }
 
 export async function hashPassword(password) {
@@ -214,6 +215,7 @@ function rowToUser(row) {
   return {
     id: row.id,
     email: row.email,
+    phone: row.phone || '',
     hash: row.hash,
     role: row.role,
     active: row.active,
@@ -252,12 +254,12 @@ export async function findUsersByEmail(email) {
   return users.filter((u) => u.email === email);
 }
 
-export async function createUser({ id, email, hash, role, active }) {
+export async function createUser({ id, email, phone, hash, role, active }) {
   const db = initDb();
   if (db) {
     await db.query(
-      'INSERT INTO users (id, email, hash, role, active) VALUES ($1, $2, $3, $4, $5)',
-      [id, email, hash, role, active]
+      'INSERT INTO users (id, email, phone, hash, role, active) VALUES ($1, $2, $3, $4, $5, $6)',
+      [id, email, phone || null, hash, role, active]
     );
     return;
   }
@@ -265,6 +267,7 @@ export async function createUser({ id, email, hash, role, active }) {
   users.push({
     id,
     email,
+    phone: phone || '',
     hash,
     role,
     active,

@@ -1,0 +1,19 @@
+[Unit]
+Description=절임배추 주문관리 앱 (Jeolim Cabbage Orders)
+After=network.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+Group=__RUN_USER__
+WorkingDirectory=__APP_DIR__
+Environment=PORT=3000
+Environment=NODE_ENV=production
+ExecStart=__NODE_BIN__ server.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

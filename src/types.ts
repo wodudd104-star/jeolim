@@ -31,9 +31,15 @@ export type Order = {
   courier?: string;
   trackingNumber?: string;
   completionPhotos?: string[];
+  reservationDate?: string;
   reservationTime?: string;
   statusMemo?: string;
   shared?: boolean;
+  intakeId?: string;
+  paid?: boolean;
+  paidAt?: string;
+  paidAmount?: number;
+  paymentMethod?: string;
 };
 
 export type Customer = {
