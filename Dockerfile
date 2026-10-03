@@ -3,6 +3,8 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
+ARG VITE_TOSS_CLIENT_KEY
+ENV VITE_TOSS_CLIENT_KEY=$VITE_TOSS_CLIENT_KEY
 COPY . .
 RUN npm run build
 

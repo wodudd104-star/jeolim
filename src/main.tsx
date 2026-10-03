@@ -2400,8 +2400,9 @@ function CustomerIntakeView() {
   );
 }
 
-// 토스페이먼츠 클라이언트 키 — 실결제 전환 시 라이브 키로 교체
-const TOSS_CLIENT_KEY = 'test_ck_D5GePWvyJnrK0W0k6q8gLzN97Eoq';
+// 토스페이먼츠 클라이언트 키 (공개 브라우저 설정값)
+// 빌드 시 VITE_TOSS_CLIENT_KEY 환경변수로 주입된다. 소스에 키 값을 직접 쓰지 않는다.
+const TOSS_CLIENT_KEY = (import.meta.env.VITE_TOSS_CLIENT_KEY as string) || '';
 
 function loadTossScript(): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -2481,6 +2482,13 @@ function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?
 
   async function handlePay(balance: number) {
     if (!order) return;
+    if (!TOSS_CLIENT_KEY) {
+      setPayMessage({
+        kind: 'error',
+        text: '결제 설정이 완료되지 않았습니다. 관리자에게 문의해주세요.',
+      });
+      return;
+    }
     setPayLoading(true);
     try {
       const TossPayments = await loadTossScript();

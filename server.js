@@ -1196,9 +1196,10 @@ const intakeLimiter = rateLimit({
 });
 
 // ===== 공개 주문 결제 (토스페이먼츠) =====
-// 실결제 전환 시: 토스페이먼츠 가입 후 라이브 키를 환경변수로 설정하면 됨.
-// TOSS_CLIENT_KEY(프론트)와 TOSS_SECRET_KEY(서버)를 모두 라이브 값으로 교체.
-const TOSS_SECRET_KEY = process.env.TOSS_SECRET_KEY || 'test_sk_zXLkKEypNArWmo50nX3lmeaxYG5R';
+// 시크릿 키는 서버 전용 런타임 환경변수(TOSS_SECRET_KEY)로만 주입한다.
+// 소스 코드에 키 값이나 fallback을 두지 않는다.
+// 실결제 전환 시: 토스페이먼츠 가입 후 라이브 키를 서버 환경변수로 설정하면 됨.
+const TOSS_SECRET_KEY = process.env.TOSS_SECRET_KEY || '';
 const paymentLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -1213,6 +1214,9 @@ const paymentLimiter = rateLimit({
 const paymentInFlight = new Set();
 app.post('/api/public/payment/confirm', paymentLimiter, async (req, res) => {
   try {
+    if (!TOSS_SECRET_KEY) {
+      return res.status(503).json({ error: '결제 설정이 완료되지 않았습니다. 관리자에게 문의해주세요.' });
+    }
     const { paymentKey, orderId, amount } = req.body || {};
     const numericAmount = Number(amount);
     if (!paymentKey || typeof paymentKey !== 'string' || paymentKey.length > 200) {
