@@ -2,4 +2,8 @@ node_modules
 dist
 .env
 tsconfig.tsbuildinfo
+jc-deploy.tar.gz
+test-notify.js
+main-image.b64
+main-image-clean.b64
 

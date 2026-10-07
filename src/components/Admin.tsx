@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Order } from '../types';
 import { load, save } from '../lib/storage';
 import { clearMustChangePassword } from './Login';
 import {
@@ -7,9 +8,11 @@ import {
   deactivateUser,
   deleteUser,
   demoteUser,
+  fetchAccountNumbers,
   fetchUsers,
   promoteUser,
   resetUserPassword,
+  saveAccountNumbers,
   updateServerAuth,
 } from '../lib/api';
 
@@ -18,6 +21,12 @@ const ORDERS_KEY = 'jc_orders_v3';
 const CUSTOMERS_KEY = 'jc_customers_v1';
 const PRODUCTS_KEY = 'jc_products_v1';
 const ACCOUNT_NUMBERS_KEY = 'jc_accounts';
+
+// 계좌번호는 보안상 로컬 저장소(localStorage)에 남기지 않고
+// 서버(API)에서만 불러오며, 없을 때만 아래 기본값을 사용한다.
+const DEFAULT_ACCOUNT_NUMBERS: AccountInfo[] = [
+  { id: 'default-nh', bank: '농협', number: '351-5596-2154-83', holder: '곽재영' },
+];
 
 export type AdminAuth = {
   id: string;
@@ -37,7 +46,8 @@ export function getStoredUser() {
 }
 
 export function getStoredAccountNumbers(): AccountInfo[] {
-  return load(ACCOUNT_NUMBERS_KEY, []);
+  const list = load(ACCOUNT_NUMBERS_KEY, [] as AccountInfo[]);
+  return list.length > 0 ? list : DEFAULT_ACCOUNT_NUMBERS;
 }
 
 export function getStoredAccountNumber(): string {
@@ -46,21 +56,51 @@ export function getStoredAccountNumber(): string {
   return list.map((a) => `${a.bank} ${a.number} ${a.holder}`).join('\n');
 }
 
-export function setStoredUser(user: { id: string; role: string; email: string }) {
+export function setStoredUser(user: { id: string; role: string }) {
   save(AUTH_USER_KEY, user);
 }
 
 export function AccountManager() {
-  const [accounts, setAccounts] = useState<AccountInfo[]>(() => getStoredAccountNumbers());
+  const [accounts, setAccounts] = useState<AccountInfo[]>([]);
+  const [loading, setLoading] = useState(false);
   const [isAdding, setIsAdding] = useState(false);
   const [form, setForm] = useState({ bank: '', number: '', holder: '' });
 
-  function commit(next: AccountInfo[]) {
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchAccountNumbers()
+      .then((list) => {
+        if (cancelled) return;
+        // 계좌번호는 서버 상태만 사용하고 로컬 저장소에는 남기지 않는다.
+        setAccounts(list.length > 0 ? list : DEFAULT_ACCOUNT_NUMBERS);
+        localStorage.removeItem(ACCOUNT_NUMBERS_KEY);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error('계좌번호 불러오기 실패:', err.message);
+        setAccounts(getStoredAccountNumbers());
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function commit(next: AccountInfo[]) {
     setAccounts(next);
-    save(ACCOUNT_NUMBERS_KEY, next);
+    // 서버에만 저장하고 로컬 저장소는 비워 둔다 (계좌번호 노출 방지)
+    localStorage.removeItem(ACCOUNT_NUMBERS_KEY);
+    try {
+      await saveAccountNumbers(next);
+    } catch (err: any) {
+      alert('서버에 계좌번호를 저장하지 못했습니다: ' + (err.message || '오류'));
+    }
   }
 
-  function addAccount() {
+  async function addAccount() {
     if (!form.bank.trim() || !form.number.trim() || !form.holder.trim()) {
       alert('은행명, 계좌번호, 예금주를 모두 입력해주세요.');
       return;
@@ -71,14 +111,14 @@ export function AccountManager() {
       number: form.number.trim(),
       holder: form.holder.trim(),
     };
-    commit([...accounts, newAccount]);
+    await commit([...accounts, newAccount]);
     setForm({ bank: '', number: '', holder: '' });
     setIsAdding(false);
   }
 
-  function removeAccount(id: string) {
+  async function removeAccount(id: string) {
     if (confirm('이 계좌를 삭제할까요?')) {
-      commit(accounts.filter((a) => a.id !== id));
+      await commit(accounts.filter((a) => a.id !== id));
     }
   }
 
@@ -152,8 +192,20 @@ export function AccountManager() {
   );
 }
 
-export default function Admin() {
-  const [currentUser] = useState(() => getStoredUser() || { id: '', role: 'admin', email: '' });
+export default function Admin({
+  orders,
+  refreshSignal,
+  onOpenSms,
+  onOpenSalesStats,
+  onOpenPayment,
+}: {
+  orders: Order[];
+  refreshSignal?: number;
+  onOpenSms: () => void;
+  onOpenSalesStats: () => void;
+  onOpenPayment: () => void;
+}) {
+  const [currentUser] = useState(() => getStoredUser() || { id: '', role: 'admin' });
   const [currentPassword, setCurrentPassword] = useState('');
   const [newId, setNewId] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -184,7 +236,7 @@ export default function Admin() {
 
   useEffect(() => {
     loadUserList();
-  }, []);
+  }, [refreshSignal]);
 
   async function loadUserList() {
     setLoadingUsers(true);
@@ -232,7 +284,7 @@ export default function Admin() {
 
     try {
       const result = await updateServerAuth(currentPassword, newId, newPassword, email);
-      setStoredUser({ id: result.id || newId, role: currentUser.role, email });
+      setStoredUser({ id: result.id || newId, role: currentUser.role });
       clearMustChangePassword();
       setCurrentPassword('');
       setNewId('');
@@ -240,7 +292,7 @@ export default function Admin() {
       setConfirmPassword('');
       setEmail('');
       setMessage('아이디, 비밀번호, 이메일이 변경되었습니다.');
-      loadUserList();
+      await loadUserList();
     } catch (err: any) {
       setMessage(err.message || '서버 연동 중 오류가 발생했습니다.');
     }
@@ -253,7 +305,7 @@ export default function Admin() {
       } else {
         await activateUser(user.id);
       }
-      loadUserList();
+      await loadUserList();
     } catch (err: any) {
       setMessage(err.message || '상태 변경 실패');
     }
@@ -262,7 +314,7 @@ export default function Admin() {
   async function promote(user: typeof users[number]) {
     try {
       await promoteUser(user.id);
-      loadUserList();
+      await loadUserList();
     } catch (err: any) {
       setMessage(err.message || '관리자 임명 실패');
     }
@@ -271,7 +323,7 @@ export default function Admin() {
   async function demote(user: typeof users[number]) {
     try {
       await demoteUser(user.id);
-      loadUserList();
+      await loadUserList();
     } catch (err: any) {
       setMessage(err.message || '일반 사용자로 변경 실패');
     }
@@ -305,7 +357,7 @@ export default function Admin() {
       await createUser(addForm.id, addForm.password, addForm.email, phoneDigits, addForm.role, addForm.active);
       setAddForm({ id: '', password: '', confirm: '', email: '', phone: '', role: 'user', active: true });
       setIsAddOpen(false);
-      loadUserList();
+      await loadUserList();
     } catch (err: any) {
       setMessage(err.message || '회원 추가 실패');
     }
@@ -315,7 +367,7 @@ export default function Admin() {
     if (!confirm(`'${user.id}' 계정을 삭제할까요?`)) return;
     try {
       await deleteUser(user.id);
-      loadUserList();
+      await loadUserList();
     } catch (err: any) {
       setMessage(err.message || '삭제 실패');
     }
@@ -345,6 +397,7 @@ export default function Admin() {
         smsNote: result.smsNote,
       });
       setResetTarget(null);
+      await loadUserList();
     } catch (err: any) {
       setResetError(err.message || '비밀번호 초기화 실패');
     } finally {
@@ -418,63 +471,19 @@ export default function Admin() {
       </section>
 
       <section className='panel'>
-        <h2>아이디 / 비밀번호 / 이메일 변경</h2>
-        <form onSubmit={handleCredentialsChange} className='admin-form'>
-          <label>
-            현재 비밀번호
-            <input
-              type='password'
-              className='input'
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              placeholder='현재 비밀번호'
-            />
-          </label>
-          <label>
-            새 아이디
-            <input
-              type='text'
-              className='input'
-              value={newId}
-              onChange={(e) => setNewId(e.target.value)}
-              placeholder='새 아이디'
-            />
-          </label>
-          <label>
-            새 비밀번호
-            <input
-              type='password'
-              className='input'
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              placeholder='새 비밀번호'
-            />
-          </label>
-          <label>
-            새 비밀번호 확인
-            <input
-              type='password'
-              className='input'
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              placeholder='새 비밀번호 확인'
-            />
-          </label>
-          <label>
-            이메일 (ID/PW 찾기용)
-            <input
-              type='email'
-              className='input'
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder='이메일'
-            />
-          </label>
-          {message && <p className='admin-message'>{message}</p>}
-          <button type='submit' className='btn btn-primary'>
-            변경 저장
+        <h2>빠른 관리자 메뉴</h2>
+        <p className='panel-hint'>자주 사용하는 업무를 바로 실행할 수 있습니다.</p>
+        <div className='header-actions'>
+          <button className='btn btn-primary' onClick={onOpenSalesStats}>
+            📊 매출통계
           </button>
-        </form>
+          <button className='btn btn-primary' onClick={onOpenSms}>
+            ✉ 단체문자 발송
+          </button>
+          <button className='btn btn-primary' onClick={onOpenPayment}>
+            💳 결제 입력
+          </button>
+        </div>
       </section>
 
       <section className='panel'>

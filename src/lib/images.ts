@@ -1,5 +1,5 @@
-export const MAX_IMAGE_EDGE = 800;
-export const IMAGE_QUALITY = 0.7;
+export const MAX_IMAGE_EDGE = 1200;
+export const IMAGE_QUALITY = 0.85;
 
 function heicHint(file: File): string {
   if (/heic|heif/i.test(file.type) || /\.hei[cf]$/i.test(file.name)) {

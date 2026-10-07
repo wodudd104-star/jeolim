@@ -1,3 +1,5 @@
+import { Customer } from '../types';
+
 const API_URL = ((import.meta as any).env.VITE_API_URL as string) || '';
 
 function getUrl(path: string) {
@@ -31,6 +33,18 @@ export function subscribeEvents(onChange: (key: string) => void): () => void {
     } catch { /* 무시 */ }
   });
   return () => es.close();
+}
+
+export async function deleteOrderApi(id: string) {
+  const res = await fetch(getUrl(`/api/orders/${encodeURIComponent(id)}`), {
+    method: 'DELETE',
+    headers: getHeaders(),
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || '주문 삭제에 실패했습니다.');
+  }
 }
 
 export async function fetchAllAppData(): Promise<Record<string, unknown> | null> {
@@ -79,6 +93,17 @@ export async function fetchPublicOrder(id: string) {
   return res.json();
 }
 
+export async function cancelPublicOrder(id: string) {
+  const res = await fetch(getUrl(`/api/public/order/${encodeURIComponent(id)}/cancel`), {
+    method: 'POST',
+    headers: getHeaders(),
+    credentials: 'include',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
 export async function confirmPublicPayment(paymentKey: string, orderId: string, amount: number) {
   const res = await fetch(getUrl('/api/public/payment/confirm'), {
     method: 'POST',
@@ -96,7 +121,14 @@ export async function fetchPublicPayments() {
   });
   if (!res.ok) return [];
   return res.json() as Promise<
-    Array<{ id: string; paidAt?: string; paidAmount?: number; paymentMethod?: string }>
+    Array<{
+      id: string;
+      paidAt?: string;
+      paidAmount?: number;
+      depositAmount?: number;
+      totalPrice?: number;
+      paymentMethod?: string;
+    }>
   >;
 }
 
@@ -123,6 +155,7 @@ export async function submitPublicCustomer(payload: {
   name?: string;
   phone: string;
   address?: string;
+  addressDetail?: string;
   memo?: string;
   arrivalDate?: string;
   quantity?: number;
@@ -180,7 +213,7 @@ export async function login(id: string, password: string) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '로그인 실패');
-  return data as { id: string; email: string; role: string; active: boolean; mustChangePassword?: boolean };
+  return data as { id: string; email: string; phone?: string; role: string; active: boolean; mustChangePassword?: boolean };
 }
 
 export async function logout() {
@@ -349,4 +382,63 @@ export async function updateServerAuth(
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '서버 계정 정보 수정 실패');
   return data;
+}
+
+export async function fetchAccountNumbers(): Promise<{ id: string; bank: string; number: string; holder: string }[]> {
+  const res = await fetch(getUrl('/api/account-numbers'), {
+    credentials: 'include',
+  });
+  if (!res.ok) throw new Error('계좌번호를 불러오지 못했습니다.');
+  return res.json();
+}
+
+export async function saveAccountNumbers(accounts: { id: string; bank: string; number: string; holder: string }[]): Promise<void> {
+  const res = await fetch(getUrl('/api/account-numbers'), {
+    method: 'PUT',
+    headers: getHeaders(),
+    body: JSON.stringify(accounts),
+    credentials: 'include',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || '계좌번호 저장 실패');
+}
+
+export async function fetchCustomers(): Promise<Customer[]> {
+  const res = await fetch(getUrl('/api/customers'), {
+    credentials: 'include',
+  });
+  if (!res.ok) throw new Error('고객 목록을 불러오지 못했습니다.');
+  return res.json();
+}
+
+export async function createCustomer(customer: Omit<Customer, 'id' | 'createdAt'>): Promise<Customer> {
+  const res = await fetch(getUrl('/api/customers'), {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify(customer),
+    credentials: 'include',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || '고객 추가 실패');
+  return data.customer;
+}
+
+export async function updateCustomerApi(id: string, patch: Partial<Customer>): Promise<void> {
+  const res = await fetch(getUrl(`/api/customers/${id}`), {
+    method: 'PUT',
+    headers: getHeaders(),
+    body: JSON.stringify(patch),
+    credentials: 'include',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || '고객 수정 실패');
+}
+
+export async function deleteCustomerApi(id: string): Promise<void> {
+  const res = await fetch(getUrl(`/api/customers/${id}`), {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || '고객 삭제 실패');
 }

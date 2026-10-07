@@ -18,7 +18,7 @@ const MUST_CHANGE_PW_KEY = 'jc_must_change_pw';
 export type AuthUser = {
   id: string;
   role: string;
-  email: string;
+  phone?: string;
 };
 
 export function isLoggedIn() {
@@ -118,7 +118,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
         } else {
           sessionStorage.removeItem(MUST_CHANGE_PW_KEY);
         }
-        setStoredUser({ id: user.id, role: user.role, email: user.email });
+        setStoredUser({ id: user.id, role: user.role, phone: user.phone || '' });
         onLogin();
       }
     }).catch(() => {});
@@ -159,7 +159,7 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       } else {
         sessionStorage.removeItem(MUST_CHANGE_PW_KEY);
       }
-      setStoredUser({ id: user.id, role: user.role, email: user.email });
+      setStoredUser({ id: user.id, role: user.role, phone: user.phone || '' });
       onLogin();
     } catch (err: any) {
       setError(err.message || '로그인 중 오류가 발생했습니다.');

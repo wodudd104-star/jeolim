@@ -14,6 +14,11 @@ import bcrypt from 'bcrypt';
 import {
   initDb,
   ensureUsersTable,
+  migrateUsersFromFile,
+  ensureKvTable,
+  ensureCustomersTable,
+  ensureOrdersTable,
+  ensureGalleryTable,
   listUsers,
   findUserById,
   findUsersByEmail,
@@ -27,9 +32,25 @@ import {
   recordFailedLogin,
   resetFailedLogins,
   hasKv,
-  ensureKvTable,
   kvGet,
   kvSet,
+  listCustomers,
+  insertCustomer,
+  updateCustomerDb,
+  deleteCustomerDb,
+  listOrders,
+  getOrderDb,
+  insertOrder,
+  updateOrderDb,
+  deleteOrderDb,
+  ensureOrderTombstonesTable,
+  addOrderTombstone,
+  listOrderTombstones,
+  migrateCustomersFromFile,
+  migrateOrdersFromFile,
+  getGalleryDb,
+  setGalleryDb,
+  migrateGalleryFromFile,
 } from './src/lib/db.js';
 
 config();
@@ -79,6 +100,54 @@ const globalLimiter = rateLimit({
 });
 app.use(globalLimiter);
 
+// 민감 정보 마스킹 유틸리티
+const SENSITIVE_KEYS = [
+  'password', 'currentPassword', 'newPassword', 'confirmPassword', 'confirm',
+  'hash', 'token', 'secret', 'apiKey', 'apiSecret', 'credential', 'privateKey',
+  'apikey', 'api_secret', 'client_key', 'client_secret', 'merchant', 'merchantId',
+  'session', 'authorization', 'cookie', 'emailPass', 'solapi', 'github_token',
+  'database_url', 'supabase_url', 'supabase_anon_key', 'kv_bridge_token',
+];
+
+function maskSensitive(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    return value.map(maskSensitive);
+  }
+  const masked = {};
+  for (const [key, val] of Object.entries(value)) {
+    const lowerKey = key.toLowerCase();
+    if (SENSITIVE_KEYS.some((s) => lowerKey.includes(s))) {
+      masked[key] = '***';
+    } else if (typeof val === 'object') {
+      masked[key] = maskSensitive(val);
+    } else {
+      masked[key] = val;
+    }
+  }
+  return masked;
+}
+
+// 요청 로깅: 비밀번호/해시 등 민감 필드는 마스킹 처리
+app.use((req, res, next) => {
+  const clientIp = req.ip || req.socket.remoteAddress || '-';
+  const logEntry = {
+    time: new Date().toISOString(),
+    method: req.method,
+    url: req.originalUrl || req.url,
+    ip: clientIp,
+    userAgent: req.headers['user-agent'],
+  };
+  if (req.session?.userId) {
+    logEntry.user = req.session.userId;
+  }
+  if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+    logEntry.body = maskSensitive(req.body);
+  }
+  console.log(JSON.stringify(logEntry));
+  next();
+});
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -88,14 +157,44 @@ const authLimiter = rateLimit({
   handler: (_req, res) => res.status(429).json({ error: '너무 많은 요청입니다. 잠시 후 다시 시도해주세요.' }),
 });
 
+// 문자 발송은 비용이 발생하고 API 키가 사용되므로 별도 rate limit 적용 (관리자 전용)
+const smsLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 50,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).json({ error: '문자 발송 요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' }),
+});
+
 const AUTH_FILE = path.join(__dirname, 'data', 'auth.json');
 const SIGNUP_LOG_FILE = path.join(__dirname, 'data', 'signups.json');
-const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const SESSION_SECRET_FILE = path.join(__dirname, 'data', '.session_secret');
+
+// 세션 서명 키: 예측 불가능해야 하며 서버 재시작 시에도 달라지지 않아야 한다.
+// 1순위: SESSION_SECRET 환경변수, 2순위: data/.session_secret 파일, 3순위: 신규 생성 후 파일 저장.
+function loadOrCreateSessionSecret() {
+  if (process.env.SESSION_SECRET) {
+    return process.env.SESSION_SECRET;
+  }
+  try {
+    if (fsSync.existsSync(SESSION_SECRET_FILE)) {
+      const saved = fsSync.readFileSync(SESSION_SECRET_FILE, 'utf-8').trim();
+      if (saved.length >= 32) return saved;
+    }
+  } catch { /* 파일 읽기 실패 시 무시하고 새로 생성 */ }
+  const generated = crypto.randomBytes(32).toString('hex');
+  try {
+    fsSync.mkdirSync(path.dirname(SESSION_SECRET_FILE), { recursive: true });
+    fsSync.writeFileSync(SESSION_SECRET_FILE, generated, { mode: 0o600 });
+    console.warn('[SECURITY] SESSION_SECRET 환경변수가 설정되지 않아 안전한 랜덤 값을 생성해 data/.session_secret에 저장했습니다. 운영 환경에서는 .env SESSION_SECRET 설정을 권장합니다.');
+  } catch (err) {
+    console.warn('[SECURITY] data/.session_secret 저장 실패. 서버 재시작 시 세션이 무효화될 수 있습니다:', err.message);
+  }
+  return generated;
+}
+const SESSION_SECRET = loadOrCreateSessionSecret();
+
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24시간
-// 기본 관리자 비밀번호 (환경변수로 재정의 가능). 외부 공개 환경에서는 반드시 변경할 것.
-const DEFAULT_ADMIN_PASSWORD = process.env.DEFAULT_ADMIN_PASSWORD || '0000';
-// 로그인 시 존재하지 않는 아이디의 응답 시간을 실제 계정과 동일하게 맞추는
-// 더미 bcrypt 해시 (타이밍 기반 계정 존재 여부 추론 방지)
 const DUMMY_BCRYPT_HASH = bcrypt.hashSync(
   `timing-equalizer-${crypto.randomBytes(16).toString('hex')}`,
   12
@@ -134,7 +233,7 @@ function scheduleSessionSave() {
         await kvSet('sessions', obj);
       } else {
         fsSync.mkdirSync(path.dirname(SESSIONS_FILE), { recursive: true });
-        fsSync.writeFileSync(SESSIONS_FILE, JSON.stringify(obj));
+        fsSync.writeFileSync(SESSIONS_FILE, JSON.stringify(obj), { mode: 0o600 });
       }
     } catch (err) {
       console.error('[SESSION] 세션 저장 실패:', err.message);
@@ -304,36 +403,32 @@ async function migrateJsonToDb() {
   }
 }
 
-async function ensureDefaultAdmin() {
-  // 기본 admin 계정은 최초 설치 시에만 생성한다.
-  // DISABLE_DEFAULT_ADMIN=true 가 설정되면 절대 생성하지 않으며,
-  // 다른 관리자가 이미 있으면 기본 admin 을 생성하지 않는다.
-  if (process.env.DISABLE_DEFAULT_ADMIN === 'true') return;
-  const admin = await findUserById('admin');
-  if (admin) {
-    // 기존 admin이 구형(비-bcrypt) 해시를 쓰면 기본 비밀번호로 재설정
-    if (!admin.hash || !admin.hash.startsWith('$2')) {
-      const hash = await hashPassword(DEFAULT_ADMIN_PASSWORD);
-      await updateUser('admin', { hash, failed_logins: 0, locked_until: null });
-      console.log('[SECURITY] Default admin password reset to default (legacy hash migrated).');
+// ===== 관리자 계정 강제 정책 =====
+// admin 계정은 완전히 제거하고, ADMIN_USER_ID(기본값 wodudd102)를 관리자로 지정한다.
+// 서버 시작 시마다 실행되어 auth.json/DB에 영구 반영된다.
+const ADMIN_USER_ID = process.env.ADMIN_USER_ID || 'wodudd102';
+
+async function ensureAdminPolicy() {
+  try {
+    // 1) admin 계정 삭제
+    const adminUser = await findUserById('admin');
+    if (adminUser) {
+      await deleteUserById('admin');
+      console.log('[SECURITY] admin 계정이 제거되었습니다.');
     }
-    return;
+    // 2) 지정된 관리자 계정이 있으면 role=admin으로 강제, 없으면 생성하지 않음
+    const target = await findUserById(ADMIN_USER_ID);
+    if (target) {
+      if (target.role !== 'admin' || target.active !== true) {
+        await updateUser(ADMIN_USER_ID, { role: 'admin', active: true });
+        console.log(`[SECURITY] ${ADMIN_USER_ID} 계정을 관리자로 설정했습니다.`);
+      }
+    } else {
+      console.warn(`[SECURITY] 관리자 계정 ${ADMIN_USER_ID}가 존재하지 않습니다. 로그인 후 관리자를 추가하거나 .env ADMIN_USER_ID를 확인하세요.`);
+    }
+  } catch (err) {
+    console.error('[SECURITY] 관리자 계정 정책 적용 오류:', err.message);
   }
-  const users = await listUsers();
-  if (users.some((u) => u.role === 'admin')) {
-    // 다른 관리자가 이미 있으므로 기본 admin을 되살리지 않음
-    console.log('[SECURITY] Default admin not created (another admin exists).');
-    return;
-  }
-  const hash = await hashPassword(DEFAULT_ADMIN_PASSWORD);
-  await createUser({
-    id: 'admin',
-    email: '',
-    hash,
-    role: 'admin',
-    active: true,
-  });
-  console.log('[SECURITY] Default admin created (admin/0000) - remove this account before production use.');
 }
 
 function isLocked(user) {
@@ -445,15 +540,14 @@ app.post('/api/login', authLimiter, async (req, res) => {
   }
 
   await resetFailedLogins(id);
-  const mustChangePassword = user.id === 'admin' && password === DEFAULT_ADMIN_PASSWORD;
-  const { token, expiresAt } = createSession(user.id, user.role, { mustChangePassword });
+  const { token, expiresAt } = createSession(user.id, user.role);
   setSessionCookie(res, token, expiresAt);
   res.json({
     id: user.id,
     role: user.role,
     active: user.active,
     email: user.email,
-    mustChangePassword,
+    phone: user.phone || '',
   });
 });
 
@@ -648,12 +742,13 @@ app.post('/api/users/:id/reset-password', requireAdmin, async (req, res) => {
     revokeUserSessions(target.id);
     console.log(`[ADMIN] Password reset for user '${target.id}' by '${req.session.userId}'`);
 
-    // 회원의 핸드폰번호가 등록되어 있으면 새 비밀번호를 문자로 전송
+    // 회원의 핸드폰번호가 등록되어 있으면 비밀번호 초기화 알림 문자 전송
+    // (평문 비밀번호는 문자/로그에 남기지 않음 — 관리자 화면에서만 확인)
     let smsSent = false;
     let smsNote = '';
     const targetPhone = normalizePhone(target.phone || '');
     if (targetPhone) {
-      const smsText = `[절임배추 주문관리] ${target.id}님의 비밀번호가 초기화되었습니다. 새 비밀번호: ${newPassword} 로그인 후 비밀번호를 변경해주세요.`;
+      const smsText = `[절임배추 주문관리] ${target.id}님의 비밀번호가 초기화되었습니다. 관리자에게 문의해주세요.`;
       // 비밀번호 초기화 알림은 친구톡이 아닌 일반 문자로 강제 발송 (채널 친구 여부와 무관하게 도착)
       const smsResult = await sendSolapiMessages([targetPhone], smsText, { forceSms: true });
       smsSent = smsResult.ok;
@@ -816,6 +911,32 @@ app.post('/api/update-auth', requireAuth, async (req, res) => {
   res.json({ success: true, id: currentId });
 });
 
+const ACCOUNT_NUMBERS_FILE = path.join(__dirname, 'src', 'lib', 'data', 'account-numbers.json');
+
+app.get('/api/account-numbers', requireAuth, async (req, res) => {
+  try {
+    const raw = await fs.readFile(ACCOUNT_NUMBERS_FILE, 'utf-8');
+    res.json(JSON.parse(raw));
+  } catch {
+    res.json([]);
+  }
+});
+
+app.put('/api/account-numbers', requireAdmin, async (req, res) => {
+  try {
+    const accounts = req.body;
+    if (!Array.isArray(accounts)) {
+      return res.status(400).json({ error: '배열 형식이어야 합니다.' });
+    }
+    await fs.mkdir(path.dirname(ACCOUNT_NUMBERS_FILE), { recursive: true });
+    await fs.writeFile(ACCOUNT_NUMBERS_FILE, JSON.stringify(accounts, null, 2), { mode: 0o600 });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[ACCOUNT-NUMBERS] 저장 실패:', err.message);
+    res.status(500).json({ error: '저장 중 오류가 발생했습니다.' });
+  }
+});
+
 function getAuthHeader(apiKey, apiSecret) {
   const date = new Date().toISOString();
   const salt = crypto.randomUUID();
@@ -891,7 +1012,68 @@ async function sendSolapiMessages(phones, text, opts = {}) {
   }
 }
 
-app.post('/api/send-sms', requireAdmin, async (req, res) => {
+// 관리자 알림 대상 전화번호 (환경변수 ADMIN_NOTIFY_PHONES + 활성 관리자 계정의 연락처)
+async function getAdminNotifyPhones() {
+  const phones = new Set();
+  for (const raw of String(process.env.ADMIN_NOTIFY_PHONES || '').split(',')) {
+    const digits = String(raw || '').replace(/\D/g, '');
+    if (/^0\d{8,10}$/.test(digits)) phones.add(digits);
+  }
+  try {
+    const users = await listUsers();
+    for (const u of users) {
+      if (u.role !== 'admin' || u.active === false) continue;
+      const digits = String(u.phone || '').replace(/\D/g, '');
+      if (/^0\d{8,10}$/.test(digits)) phones.add(digits);
+    }
+  } catch (err) {
+    console.error('[SMS] 관리자 연락처 조회 실패:', err.message);
+  }
+  return [...phones];
+}
+
+// KST 기준 날짜 문자열(YYYY-MM-DD)
+function kstDateString(iso) {
+  return new Date(new Date(iso).getTime() + 9 * 3600000).toISOString().slice(0, 10);
+}
+
+// URL로 접수된 오늘(KST) 하루치 접수를 수량 기준으로 종합해 관리자에게 문자 발송
+// 새 접수가 저장될 때만 호출되므로, 접수가 없는 날에는 문자가 나가지 않는다.
+async function notifyAdminDailyIntake() {
+  try {
+    const phones = await getAdminNotifyPhones();
+    if (phones.length === 0) {
+      console.log('[SMS] 관리자 알림 대상 연락처가 없어 일일 접수 알림을 건너뜁니다.');
+      return;
+    }
+    const list = await storeRead('customer_intake', INTAKE_FILE, []);
+    const entries = Array.isArray(list) ? list : [];
+    const today = kstDateString(new Date().toISOString());
+    const todayEntries = entries.filter((e) => kstDateString(e.createdAt) === today);
+    if (todayEntries.length === 0) return;
+    const totalCount = todayEntries.length;
+    const totalQuantity = todayEntries.reduce((sum, e) => sum + (Number(e.quantity) || 0), 0);
+    const byMethod = new Map();
+    for (const e of todayEntries) {
+      const key = ['방문', '배송', '택배'].includes(e.receiveMethod) ? e.receiveMethod : '방문';
+      const agg = byMethod.get(key) || { count: 0, qty: 0 };
+      agg.count += 1;
+      agg.qty += Number(e.quantity) || 0;
+      byMethod.set(key, agg);
+    }
+    const parts = [...byMethod.entries()].map(([m, v]) => `${m} ${v.count}건/${v.qty}`);
+    const datePart = today.slice(5).replace('-', '/');
+    const text = `[절임배추] ${datePart} URL 접수: 총 ${totalCount}건 수량 ${totalQuantity} (${parts.join(', ')})`;
+    const result = await sendSolapiMessages(phones, text, { forceSms: true });
+    if (!result.ok) {
+      console.error('[SMS] 관리자 일일 접수 알림 실패:', result.error);
+    }
+  } catch (err) {
+    console.error('[SMS] 관리자 일일 접수 알림 오류:', err.message);
+  }
+}
+
+app.post('/api/send-sms', requireAdmin, smsLimiter, async (req, res) => {
   const { recipients, message } = req.body;
   const apiKey = process.env.SOLAPI_API_KEY;
   const apiSecret = process.env.SOLAPI_API_SECRET;
@@ -988,6 +1170,8 @@ const APP_DATA_KEYS = new Set([
   'accounts',
   'gallery',
   'gallery_notice',
+  'materials',
+  'preparationDays',
 ]);
 // UI상 관리자만 편집하는 데이터 — 서버에서도 관리자 쓰기만 허용
 // (orders/customers는 일반 사용자도 주문 등록 과정에서 쓰므로 제외)
@@ -996,6 +1180,8 @@ const ADMIN_ONLY_DATA_KEYS = new Set([
   'accounts',
   'gallery',
   'gallery_notice',
+  'materials',
+  'preparationDays',
 ]);
 
 // ===== 공유 주문 / 갤러리 스냅샷 (공개 조회용) =====
@@ -1010,9 +1196,9 @@ async function readJsonSafe(file, fallback) {
   }
 }
 
-async function writeJsonSafe(file, data) {
+async function writeJsonSafe(file, data, mode = 0o644) {
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, JSON.stringify(data, null, 2));
+  await fs.writeFile(file, JSON.stringify(data, null, 2), { mode });
 }
 
 // DB(Supabase)가 연결되면 app_kv 테이블에 영구 저장, 오류/미연결 시 로컬 JSON 폭백
@@ -1028,7 +1214,7 @@ async function storeRead(kvKey, file, fallback) {
   return readJsonSafe(file, fallback);
 }
 
-async function storeWrite(kvKey, file, data) {
+async function storeWrite(kvKey, file, data, mode = 0o644) {
   if (hasKv()) {
     try {
       await kvSet(kvKey, data);
@@ -1037,7 +1223,7 @@ async function storeWrite(kvKey, file, data) {
       console.error(`[STORE] ${kvKey} 저장 실패, JSON 폭백:`, err.message);
     }
   }
-  await writeJsonSafe(file, data);
+  await writeJsonSafe(file, data, mode);
 }
 
 // ===== 실시간 동기화 (SSE) =====
@@ -1076,12 +1262,51 @@ app.get('/api/events', requireAuth, (req, res) => {
   });
 });
 
-app.get('/api/data/all', requireAuth, async (_req, res) => {
+// 주문 개별 삭제 (관리자 전용).
+// 삭제 시 tombstone(삭제 기록)을 남겨, 오래된 기기의 전체 동기화가
+// 삭제된 주문을 되살리지 못하게 한다.
+app.delete('/api/orders/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const order = await getOrderDb(id);
+    if (!order) return res.status(404).json({ error: '주문을 찾을 수 없습니다.' });
+    await addOrderTombstone(id);
+    await deleteOrderDb(id);
+    broadcastChange('orders', req.headers['x-client-id']);
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '주문 삭제에 실패했습니다.' });
+  }
+});
+
+app.get('/api/data/all', requireAuth, async (req, res) => {
   try {
     const store = await storeRead('app_data', APP_DATA_FILE, {});
     const out = {};
     for (const key of Object.keys(store)) {
-      if (APP_DATA_KEYS.has(key)) out[key] = store[key] ? store[key].value : undefined;
+      if (!APP_DATA_KEYS.has(key)) continue;
+      if (key === 'orders') {
+        const fromDb = await listOrders();
+        out[key] = fromDb !== null ? fromDb : (store[key] ? store[key].value : undefined);
+      } else if (key === 'customers') {
+        const fromDb = await listCustomers();
+        out[key] = fromDb !== null ? fromDb : (store[key] ? store[key].value : undefined);
+      } else {
+        out[key] = store[key] ? store[key].value : undefined;
+      }
+    }
+    // 일반회원은 본인 데이터만 조회 가능 (개인정보 보호)
+    if (req.session.role !== 'admin') {
+      const u = await findUserById(req.session.userId);
+      const ownPhone = normalizePhone(u && u.phone);
+      out.orders = ownPhone && Array.isArray(out.orders)
+        ? out.orders.filter((o) => normalizePhone(o && o.phone) === ownPhone)
+        : [];
+      out.customers = ownPhone && Array.isArray(out.customers)
+        ? out.customers.filter((c) => normalizePhone(c && c.phone) === ownPhone)
+        : [];
+      // 자재/매입 원가 데이터는 관리자 전용
+      if (out.materials !== undefined) out.materials = [];
     }
     return res.json(out);
   } catch {
@@ -1098,9 +1323,146 @@ app.put('/api/data/:key', requireAuth, async (req, res) => {
     if (ADMIN_ONLY_DATA_KEYS.has(key) && req.session.role !== 'admin') {
       return res.status(403).json({ error: '관리자 권한이 필요합니다.' });
     }
+    if (key === 'customers' && req.session.role !== 'admin') {
+      return res.status(403).json({ error: '일반회원은 주문 수량만 변경할 수 있습니다.' });
+    }
+
+    // 고객 목록 전체 교체 동기화는 폐기했다.
+    // 과거: 브라우저 localStorage의 오래된 고객 목록이 DB를 통째로 덮어써
+    //       고객 60여 명이 사라지는 사고가 반복됨.
+    // 현재: 고객 추가/수정/삭제는 항상 /api/customers(개별 API)로만 처리된다.
+    //       구버전 앱이 보내는 전체 교체 요청은 무시한다(데이터 보호).
+    if (key === 'customers' && Array.isArray(req.body)) {
+      return res.json({ ok: true });
+    }
+
+    if (key === 'orders' && Array.isArray(req.body)) {
+      const fromDb = await listOrders();
+      if (fromDb !== null) {
+        // 삭제 기록(tombstone)에 있는 주문은 되살리지 않는다.
+        const tombstones = await listOrderTombstones();
+        let toStore = req.body.filter((o) => o && o.id && !tombstones.has(o.id));
+        // 일반회원은 본인 주문만 저장할 수 있다.
+        // - 기존 주문: 수량만 변경 가능 (상태/금액 등은 서버 값 유지)
+        // - 새 주문(DB에 없는 것): 본인 주문으로 등록 허용 (연락처/단가는 서버에서 보정)
+        if (req.session.role !== 'admin') {
+          const u = await findUserById(req.session.userId);
+          const ownPhone = normalizePhone(u && u.phone);
+          if (!ownPhone) {
+            return res.status(403).json({ error: '계정에 연락처가 등록되어 있지 않습니다. 관리자에게 문의하세요.' });
+          }
+          const productStore = await storeRead('app_data', APP_DATA_FILE, {});
+          const products = (productStore.products && productStore.products.value) || [];
+          const existingIds = new Set(fromDb.map((o) => o.id));
+          const requested = new Map(toStore.map((o) => [o.id, o]));
+          const mine = fromDb
+            .filter((o) => normalizePhone(o && o.phone) === ownPhone)
+            .map((current) => {
+              const incoming = requested.get(current.id);
+              if (!incoming) return current;
+              const quantity = Math.max(1, Math.floor(Number(incoming.quantity) || current.quantity || 1));
+              const totalPrice = Math.max(0, quantity * (Number(current.pricePerUnit) || 0));
+              const depositAmount = Math.min(Number(current.depositAmount) || 0, totalPrice);
+              const paid = totalPrice > 0 && depositAmount >= totalPrice;
+              return { ...current, quantity, totalPrice, depositAmount, paid, deposit: paid };
+            });
+          const newOrders = toStore
+            .filter((o) => !existingIds.has(o.id))
+            .map((o) => {
+              const product = products.find((p) => p && p.id === o.productId);
+              const pricePerUnit = product
+                ? Math.max(0, Number(product.price) || 0)
+                : Math.max(0, Number(o.pricePerUnit) || 0);
+              const quantity = Math.max(1, Math.floor(Number(o.quantity) || 1));
+              const totalPrice = pricePerUnit * quantity;
+              const depositAmount = Math.min(totalPrice, Math.max(0, Number(o.depositAmount) || 0));
+              const paid = totalPrice > 0 && depositAmount >= totalPrice;
+              return {
+                ...o,
+                phone: ownPhone,
+                unit: product ? product.unit : o.unit,
+                cabbageType: product ? product.name : o.cabbageType,
+                quantity,
+                pricePerUnit,
+                totalPrice,
+                depositAmount,
+                paid,
+                deposit: paid,
+                status: '접수',
+                shared: false,
+              };
+            });
+          toStore = [...mine, ...newOrders];
+        }
+        // 전체 삭제 후 다시 쓰지 않고 개별 upsert만 한다.
+        // (오래된 기기가 빈/오래된 목록을 보내도 서버의 다른 주문이 지워지지 않게 한다.)
+        // 주문 삭제는 DELETE /api/orders/:id 로만 처리된다.
+        for (const o of toStore) {
+          await insertOrder(o);
+        }
+        broadcastChange('orders', req.headers['x-client-id']);
+        return res.json({ ok: true });
+      }
+    }
+
     const store = await storeRead('app_data', APP_DATA_FILE, {});
+    // DB 미사용(파일 저장) 환경에서도 일반회원은 본인 데이터만 교체
+    if ((key === 'orders' || key === 'customers') && Array.isArray(req.body) && req.session.role !== 'admin') {
+      const u = await findUserById(req.session.userId);
+      const ownPhone = normalizePhone(u && u.phone);
+      if (!ownPhone) {
+        return res.status(403).json({ error: '계정에 연락처가 등록되어 있지 않습니다. 관리자에게 문의하세요.' });
+      }
+      const existing = store[key] && Array.isArray(store[key].value) ? store[key].value : [];
+      const others = existing.filter((o) => normalizePhone(o && o.phone) !== ownPhone);
+      const requested = new Map(req.body.filter((o) => o && o.id).map((o) => [o.id, o]));
+      let mine = [];
+      let newEntries = [];
+      if (key === 'orders') {
+        const existingIds = new Set(existing.map((o) => o.id));
+        const products = (store.products && store.products.value) || [];
+        mine = existing
+          .filter((o) => normalizePhone(o && o.phone) === ownPhone)
+          .map((current) => {
+            const incoming = requested.get(current.id);
+            if (!incoming) return current;
+            const quantity = Math.max(1, Math.floor(Number(incoming.quantity) || current.quantity || 1));
+            const totalPrice = Math.max(0, quantity * (Number(current.pricePerUnit) || 0));
+            const depositAmount = Math.min(Number(current.depositAmount) || 0, totalPrice);
+            const paid = totalPrice > 0 && depositAmount >= totalPrice;
+            return { ...current, quantity, totalPrice, depositAmount, paid, deposit: paid };
+          });
+        newEntries = req.body
+          .filter((o) => o && o.id && !existingIds.has(o.id))
+          .map((o) => {
+            const product = products.find((p) => p && p.id === o.productId);
+            const pricePerUnit = product
+              ? Math.max(0, Number(product.price) || 0)
+              : Math.max(0, Number(o.pricePerUnit) || 0);
+            const quantity = Math.max(1, Math.floor(Number(o.quantity) || 1));
+            const totalPrice = pricePerUnit * quantity;
+            const depositAmount = Math.min(totalPrice, Math.max(0, Number(o.depositAmount) || 0));
+            const paid = totalPrice > 0 && depositAmount >= totalPrice;
+            return {
+              ...o,
+              phone: ownPhone,
+              unit: product ? product.unit : o.unit,
+              cabbageType: product ? product.name : o.cabbageType,
+              quantity,
+              pricePerUnit,
+              totalPrice,
+              depositAmount,
+              paid,
+              deposit: paid,
+              status: '접수',
+              shared: false,
+            };
+          });
+      }
+      req.body = [...others, ...mine, ...newEntries];
+    }
     store[key] = { value: req.body, savedAt: new Date().toISOString() };
-    await storeWrite('app_data', APP_DATA_FILE, store);
+    await storeWrite('app_data', APP_DATA_FILE, store, 0o600);
     broadcastChange(key, req.headers['x-client-id']);
     return res.json({ ok: true });
   } catch {
@@ -1117,20 +1479,52 @@ app.put('/api/public/order/:id', requireAuth, async (req, res) => {
     if (snapshot.id !== req.params.id) {
       return res.status(400).json({ error: '주문 ID가 일치하지 않습니다.' });
     }
-    const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
-    if (!store.orders || typeof store.orders !== 'object') store.orders = {};
-    // 앱 동기화가 서버의 결제 기록을 덮어쓰지 않도록 보존
-    const existing = store.orders[req.params.id];
-    if (existing && existing.paid) {
-      snapshot.paid = existing.paid;
+    const existing = await getOrderDb(req.params.id);
+    if (req.session.role !== 'admin') {
+      const user = await findUserById(req.session.userId);
+      const ownPhone = normalizePhone(user && user.phone);
+      if (!existing || !ownPhone || normalizePhone(existing.phone) !== ownPhone) {
+        return res.status(403).json({ error: '본인 주문만 수정할 수 있습니다.' });
+      }
+      if (snapshot.shared && !existing.shared) {
+        return res.status(403).json({ error: '공유 링크는 관리자만 발급할 수 있습니다.' });
+      }
+      const quantity = Math.max(1, Math.floor(Number(snapshot.quantity) || existing.quantity || 1));
+      const totalPrice = Math.max(0, quantity * (Number(existing.pricePerUnit) || 0));
+      const depositAmount = Math.min(Number(existing.depositAmount) || 0, totalPrice);
+      const paid = totalPrice > 0 && depositAmount >= totalPrice;
+      Object.assign(snapshot, existing, { quantity, totalPrice, depositAmount, paid, deposit: paid });
+    }
+    if (existing) {
+      // 카드 승인 내역은 보존하되, 입금 누적액/완납 상태는 앱의 현재 주문 데이터로 갱신
       snapshot.paidAt = existing.paidAt;
       snapshot.paidAmount = existing.paidAmount;
       snapshot.paymentKey = existing.paymentKey;
       snapshot.paymentMethod = existing.paymentMethod;
-      snapshot.depositAmount = existing.depositAmount;
+    } else {
+      const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
+      const legacy = (store.orders || {})[req.params.id];
+      if (legacy) {
+        snapshot.paidAt = legacy.paidAt;
+        snapshot.paidAmount = legacy.paidAmount;
+        snapshot.paymentKey = legacy.paymentKey;
+        snapshot.paymentMethod = legacy.paymentMethod;
+      }
     }
-    store.orders[req.params.id] = snapshot;
-    await storeWrite('public_orders', PUBLIC_ORDERS_FILE, store);
+    const totalPrice = Math.max(0, Number(snapshot.totalPrice) || 0);
+    snapshot.depositAmount = Math.min(totalPrice, Math.max(0, Number(snapshot.depositAmount) || 0));
+    snapshot.paid = totalPrice > 0 && snapshot.depositAmount >= totalPrice;
+    snapshot.deposit = snapshot.paid;
+
+    const fromDb = await listOrders();
+    if (fromDb !== null) {
+      await insertOrder(snapshot);
+    } else {
+      const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
+      if (!store.orders || typeof store.orders !== 'object') store.orders = {};
+      store.orders[req.params.id] = snapshot;
+      await storeWrite('public_orders', PUBLIC_ORDERS_FILE, store);
+    }
     broadcastChange('orders', req.headers['x-client-id']);
     return res.json({ ok: true });
   } catch (err) {
@@ -1138,10 +1532,60 @@ app.put('/api/public/order/:id', requireAuth, async (req, res) => {
   }
 });
 
+app.post('/api/public/order/:id/cancel', async (req, res) => {
+  try {
+    let order = await getOrderDb(req.params.id);
+    if (order === null) {
+      const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
+      order = (store.orders || {})[req.params.id];
+    }
+    if (!order) return res.status(404).json({ error: '주문을 찾을 수 없습니다.' });
+    // 공유 링크로 접근한 고객이거나, 로그인한 회원(본인 주문)/관리자만 취소 가능
+    // 이 공개 라우트는 requireAuth를 거치지 않으므로 쿠키에서 세션을 직접 조회한다.
+    const session = getSession(req.cookies?.session);
+    let allowed = !!order.shared;
+    if (!allowed && session && session.userId) {
+      if (session.role === 'admin') {
+        allowed = true;
+      } else {
+        const u = await findUserById(session.userId);
+        const ownPhone = normalizePhone(u && u.phone);
+        if (ownPhone && normalizePhone(order.phone) === ownPhone) allowed = true;
+      }
+    }
+    if (!allowed) return res.status(403).json({ error: '본인 주문만 취소할 수 있습니다.' });
+    if (order.status === '완료') return res.status(400).json({ error: '완료된 주문은 취소할 수 없습니다.' });
+    if (order.status === '취소') return res.json({ ok: true, order });
+
+    const cancelled = {
+      ...order,
+      status: '취소',
+      statusMemo: [order.statusMemo, '고객 요청으로 주문 취소'].filter(Boolean).join(' / '),
+      cancelledAt: new Date().toISOString(),
+    };
+    const fromDb = await listOrders();
+    if (fromDb !== null) {
+      await insertOrder(cancelled);
+    } else {
+      const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
+      if (!store.orders || typeof store.orders !== 'object') store.orders = {};
+      store.orders[req.params.id] = cancelled;
+      await storeWrite('public_orders', PUBLIC_ORDERS_FILE, store);
+    }
+    broadcastChange('orders');
+    return res.json({ ok: true, order: cancelled });
+  } catch {
+    return res.status(500).json({ error: '주문 취소에 실패했습니다.' });
+  }
+});
+
 app.get('/api/public/order/:id', async (req, res) => {
   try {
-    const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
-    const order = (store.orders || {})[req.params.id];
+    let order = await getOrderDb(req.params.id);
+    if (order === null) {
+      const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
+      order = (store.orders || {})[req.params.id];
+    }
     if (!order) return res.status(404).json({ error: 'not found' });
     // 결제 식별키는 외부에 노출하지 않음
     const { paymentKey: _paymentKey, ...publicOrder } = order;
@@ -1153,28 +1597,42 @@ app.get('/api/public/order/:id', async (req, res) => {
 
 app.delete('/api/public/order/:id', requireAdmin, async (req, res) => {
   try {
-    const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
-    if (store.orders && store.orders[req.params.id]) {
-      delete store.orders[req.params.id];
-      await storeWrite('public_orders', PUBLIC_ORDERS_FILE, store);
-      broadcastChange('orders', req.headers['x-client-id']);
+    const fromDb = await listOrders();
+    if (fromDb !== null) {
+      await deleteOrderDb(req.params.id);
+    } else {
+      const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
+      if (store.orders && store.orders[req.params.id]) {
+        delete store.orders[req.params.id];
+        await storeWrite('public_orders', PUBLIC_ORDERS_FILE, store);
+      }
     }
+    broadcastChange('orders', req.headers['x-client-id']);
     return res.json({ ok: true });
   } catch {
     return res.status(500).json({ error: '공유 링크 삭제에 실패했습니다.' });
   }
 });
 
-// 결제 완료된 공개 주문 목록 — 앱이 주기적으로 가져가 주문 목록에 완납 반영
+// 결제 기록이 있는 공개 주문 목록 — 앱이 서버의 실제 누적 입금액/총액을 동기화
 app.get('/api/payments/public-orders', requireAuth, async (_req, res) => {
   try {
-    const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
-    const paid = Object.values(store.orders || {})
-      .filter((o) => o && o.paid)
+    let orders = [];
+    const fromDb = await listOrders();
+    if (fromDb !== null) {
+      orders = fromDb;
+    } else {
+      const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
+      orders = Object.values(store.orders || {});
+    }
+    const paid = orders
+      .filter((o) => o && (o.paid || Number(o.depositAmount) > 0))
       .map((o) => ({
         id: o.id,
         paidAt: o.paidAt,
         paidAmount: o.paidAmount,
+        depositAmount: o.depositAmount,
+        totalPrice: o.totalPrice,
         paymentMethod: o.paymentMethod,
       }));
     return res.json(paid);
@@ -1201,7 +1659,13 @@ app.put('/api/public/gallery', requireAuth, async (req, res) => {
         return res.status(400).json({ error: '잘못된 사진 데이터가 포함되어 있습니다.' });
       }
     }
-    await storeWrite('public_gallery', PUBLIC_GALLERY_FILE, { items, notice: String(notice || '') });
+    // DB 연결 시 gallery 테이블에 저장, 그렇지 않으면 JSON 파일로 저장
+    const db = initDb();
+    if (db) {
+      await setGalleryDb(items, notice);
+    } else {
+      await storeWrite('public_gallery', PUBLIC_GALLERY_FILE, { items, notice: String(notice || '') });
+    }
     broadcastChange('gallery', req.headers['x-client-id']);
     return res.json({ ok: true });
   } catch {
@@ -1211,6 +1675,11 @@ app.put('/api/public/gallery', requireAuth, async (req, res) => {
 
 app.get('/api/public/gallery', async (_req, res) => {
   try {
+    const db = initDb();
+    if (db) {
+      const data = await getGalleryDb();
+      return res.json(data);
+    }
     const data = await storeRead('public_gallery', PUBLIC_GALLERY_FILE, null);
     if (!data) return res.status(404).json({ error: 'not found' });
     return res.json(data);
@@ -1221,6 +1690,7 @@ app.get('/api/public/gallery', async (_req, res) => {
 
 // ===== 고객 자가등록 (공개 URL 접수) =====
 const INTAKE_FILE = path.join(__dirname, 'src/lib/data/customer-intake.json');
+const CUSTOMERS_FILE = path.join(__dirname, 'src/lib/data/customers.json');
 const intakeLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 30,
@@ -1307,9 +1777,11 @@ app.post('/api/public/payment/confirm', paymentLimiter, async (req, res) => {
   }
 });
 
+let intakeSubmissionQueue = Promise.resolve();
+
 app.post('/api/public/customer', intakeLimiter, async (req, res) => {
   try {
-    const { name, phone, address, memo, arrivalDate, quantity, receiveMethod } = req.body || {};
+    const { name, phone, address, addressDetail, memo, arrivalDate, quantity, receiveMethod } = req.body || {};
     const cleanName = String(name || '').trim();
     const cleanPhone = String(phone || '').trim();
     const cleanArrivalDate = String(arrivalDate || '');
@@ -1335,27 +1807,36 @@ app.post('/api/public/customer', intakeLimiter, async (req, res) => {
       name: cleanName.slice(0, 50),
       phone: cleanPhone.slice(0, 20),
       address: String(address || '').slice(0, 200),
+      addressDetail: String(addressDetail || '').slice(0, 200),
       memo: String(memo || '').slice(0, 500),
       arrivalDate: cleanArrivalDate,
       quantity: numericQuantity,
       receiveMethod: ['방문', '배송', '택배'].includes(receiveMethod) ? receiveMethod : '방문',
     };
-    const list = await storeRead('customer_intake', INTAKE_FILE, []);
-    const next = Array.isArray(list) ? list : [];
-    // 동일 번호로 60초 이내 재접수 시 중복 저장하지 않음 (중복 클릭/스팸 방지)
-    const now = Date.now();
-    const isDuplicate = next
-      .slice(-20)
-      .some(
-        (e) =>
+    const addition = intakeSubmissionQueue.then(async () => {
+      const list = await storeRead('customer_intake', INTAKE_FILE, []);
+      const next = Array.isArray(list) ? list : [];
+      const now = Date.now();
+      const isDuplicate = next
+        .slice(-20)
+        .some((e) =>
           String(e.phone || '').replace(/\D/g, '') === phoneDigits &&
+          now - Date.parse(e.createdAt) >= 0 &&
           now - Date.parse(e.createdAt) < 60_000
-      );
-    if (isDuplicate) return res.json({ ok: true });
-    next.push(entry);
-    while (next.length > 200) next.shift();
-    await storeWrite('customer_intake', INTAKE_FILE, next);
+        );
+      if (isDuplicate) return false;
+      next.push(entry);
+      while (next.length > 200) next.shift();
+      await storeWrite('customer_intake', INTAKE_FILE, next, 0o600);
+      return true;
+    });
+    intakeSubmissionQueue = addition.then(() => undefined, () => undefined);
+    const added = await addition;
+    if (!added) return res.json({ ok: true });
     broadcastChange('intake', null);
+    // 새 접수가 들어온 경우에만 오늘 하루치 접수 현황(수량)을 관리자에게 문자 발송
+    // 접수 응답을 지연시키지 않도록 발송 결과를 기다리지 않는다.
+    notifyAdminDailyIntake().catch(() => {});
     return res.json({ ok: true });
   } catch {
     return res.status(500).json({ error: '접수에 실패했습니다. 잠시 후 다시 시도해주세요.' });
@@ -1376,7 +1857,7 @@ app.post('/api/customer-intake/ack', requireAdmin, async (req, res) => {
     const ids = new Set(Array.isArray(req.body?.ids) ? req.body.ids : []);
     const list = await storeRead('customer_intake', INTAKE_FILE, []);
     const next = (Array.isArray(list) ? list : []).filter((e) => !ids.has(e.id));
-    await storeWrite('customer_intake', INTAKE_FILE, next);
+    await storeWrite('customer_intake', INTAKE_FILE, next, 0o600);
     broadcastChange('intake', req.headers['x-client-id']);
     return res.json({ ok: true });
   } catch {
@@ -1384,10 +1865,122 @@ app.post('/api/customer-intake/ack', requireAdmin, async (req, res) => {
   }
 });
 
+// ===== 고객 관리 (관리자 전용) =====
+// 고객 개인정보는 브라우저 localStorage가 아닌 서버 DB의 customers 테이블에 저장한다.
+// DB 미연결 시에는 0o600 권한의 JSON 파일로 폭백한다.
+app.get('/api/customers', requireAdmin, async (_req, res) => {
+  try {
+    const fromDb = await listCustomers();
+    if (fromDb !== null) return res.json(fromDb);
+    const list = await storeRead('customers', CUSTOMERS_FILE, []);
+    return res.json(Array.isArray(list) ? list : []);
+  } catch {
+    return res.status(500).json({ error: '고객 목록을 불러오지 못했습니다.' });
+  }
+});
+
+app.post('/api/customers', requireAdmin, async (req, res) => {
+  try {
+    const body = req.body;
+    if (!body || typeof body !== 'object' || !body.name?.trim() || !body.phone?.trim()) {
+      return res.status(400).json({ error: '이름과 연락처는 필수입니다.' });
+    }
+    const customer = {
+      ...body,
+      id: body.id || crypto.randomUUID(),
+      createdAt: body.createdAt || new Date().toISOString(),
+    };
+    const fromDb = await listCustomers();
+    if (fromDb !== null) {
+      await insertCustomer(customer);
+    } else {
+      const list = await storeRead('customers', CUSTOMERS_FILE, []);
+      const next = Array.isArray(list) ? list : [];
+      next.push(customer);
+      await storeWrite('customers', CUSTOMERS_FILE, next, 0o600);
+    }
+    broadcastChange('customers', req.headers['x-client-id']);
+    return res.json({ ok: true, customer });
+  } catch {
+    return res.status(500).json({ error: '고객 추가에 실패했습니다.' });
+  }
+});
+
+app.put('/api/customers/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const patch = req.body;
+    const fromDb = await listCustomers();
+    if (fromDb !== null) {
+      await updateCustomerDb(id, patch);
+    } else {
+      const list = await storeRead('customers', CUSTOMERS_FILE, []);
+      const next = Array.isArray(list) ? list : [];
+      const idx = next.findIndex((c) => c.id === id);
+      if (idx === -1) {
+        return res.status(404).json({ error: '고객을 찾을 수 없습니다.' });
+      }
+      next[idx] = { ...next[idx], ...patch, id };
+      await storeWrite('customers', CUSTOMERS_FILE, next, 0o600);
+    }
+    broadcastChange('customers', req.headers['x-client-id']);
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '고객 수정에 실패했습니다.' });
+  }
+});
+
+app.delete('/api/customers/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const fromDb = await listCustomers();
+    if (fromDb !== null) {
+      await deleteCustomerDb(id);
+    } else {
+      const list = await storeRead('customers', CUSTOMERS_FILE, []);
+      const next = (Array.isArray(list) ? list : []).filter((c) => c.id !== id);
+      await storeWrite('customers', CUSTOMERS_FILE, next, 0o600);
+    }
+    broadcastChange('customers', req.headers['x-client-id']);
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '고객 삭제에 실패했습니다.' });
+  }
+});
+
+// index.html은 캐시하지 않아 모든 기기가 배포 직후 최신 앱을 로드한다.
+// (해시가 붙은 정적 에셋은 기본 캐시 정책을 그대로 사용)
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path === '/index.html' || req.path.endsWith('.html')) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  }
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'dist')));
 
 app.get('*', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
+
+// 전역 에러 핸들러: 민감 정보 마스킹 후 로깅
+app.use((err, req, res, _next) => {
+  const clientIp = req.ip || req.socket.remoteAddress || '-';
+  const logEntry = {
+    time: new Date().toISOString(),
+    error: err?.message || String(err),
+    stack: err?.stack,
+    method: req.method,
+    url: req.originalUrl || req.url,
+    ip: clientIp,
+    user: req.session?.userId,
+  };
+  if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+    logEntry.body = maskSensitive(req.body);
+  }
+  console.error(JSON.stringify(logEntry));
+  res.status(err.status || err.statusCode || 500).json({ error: '서버 오류가 발생했습니다.' });
 });
 
 const PORT = process.env.PORT || 3000;
@@ -1397,7 +1990,16 @@ const PORT = process.env.PORT || 3000;
     const dbUrlSet = !!process.env.DATABASE_URL;
     console.log(`[STARTUP] DATABASE_URL ${dbUrlSet ? 'is set' : 'is NOT set'} (storage: ${dbUrlSet ? 'PostgreSQL' : 'local JSON'})`);
     await ensureUsersTable();
+    await migrateUsersFromFile();
     await ensureKvTable();
+    await ensureCustomersTable();
+    await ensureOrdersTable();
+    await ensureOrderTombstonesTable();
+    await ensureGalleryTable();
+    // DB로 저장 방식을 전환하면서 기존 JSON 파일 데이터가 있으면 한 번만 마이그레이션
+    await migrateCustomersFromFile(CUSTOMERS_FILE);
+    await migrateOrdersFromFile(PUBLIC_ORDERS_FILE);
+    await migrateGalleryFromFile(PUBLIC_GALLERY_FILE);
     await loadSessions();
     await migrateJsonToDb();
     // DB 모드 첫 부팅 시 이미지에 포함된 JSON 데이터를 DB로 이관
@@ -1419,7 +2021,7 @@ const PORT = process.env.PORT || 3000;
         }
       }
     }
-    await ensureDefaultAdmin();
+    await ensureAdminPolicy();
     const users = await listUsers();
     console.log(`Total users in storage: ${users.length}`);
     console.log(`Users: ${users.map((u) => `${u.id}(${u.role})`).join(', ')}`);

@@ -1,4 +1,4 @@
-export type OrderStatus = '접수' | '준비중' | '택배' | '현장수령' | '완료' | '취소';
+export type OrderStatus = '접수' | '준비중' | '택배' | '현장수령' | '완료' | '취소' | '환불완료';
 export type PickupType = '매장방문' | '배송';
 export type PaymentStatus = '미납' | '부분납' | '완납';
 
@@ -25,6 +25,7 @@ export type Order = {
   pickupDate: string;
   preparationDate?: string;
   address: string;
+  addressDetail?: string;
   memo: string;
   status: OrderStatus;
   deposit: boolean;
@@ -48,6 +49,7 @@ export type Customer = {
   name: string;
   phone: string;
   address: string;
+  addressDetail?: string;
   memo: string;
   arrivalDate?: string;
   quantity?: number;
@@ -60,4 +62,25 @@ export type GalleryItem = {
   note: string;
 };
 
-export type Page = 'dashboard' | 'orders' | 'customers' | 'admin' | 'gallery';
+export type Material = {
+  id: string;
+  createdAt: string;
+  date: string;
+  name: string;
+  category?: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+  totalPrice: number;
+  vendor?: string;
+  receipt?: string;
+  memo?: string;
+};
+
+export type Page =
+  | 'dashboard'
+  | 'orders'
+  | 'customers'
+  | 'admin'
+  | 'gallery'
+  | 'materials';

@@ -2,8 +2,13 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { Customer, Order } from '../types';
 import { load, save } from '../lib/storage';
-import { saveSafely } from '../lib/images';
 import { isAdmin } from './Login';
+import {
+  fetchCustomers,
+  createCustomer,
+  updateCustomerApi,
+  deleteCustomerApi,
+} from '../lib/api';
 
 declare global {
   interface Window {
@@ -61,15 +66,36 @@ function getCell(row: Record<string, any>, keys: string[]): string {
   return '';
 }
 
-export default function Customers({ orders, refreshSignal }: { orders: Order[]; refreshSignal?: number }) {
-  const [customers, setCustomers] = useState<Customer[]>(() => loadCustomers());
+export default function Customers({ orders, refreshSignal, onOpenSms }: { orders: Order[]; refreshSignal?: number; onOpenSms?: (selected: Customer[]) => void }) {
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  // 다른 기기에서 고객 정보가 저장·수정되면(SSE) 화면을 새로고침 없이 갱신
+  // 서버에서 고객 목록을 불러오고 브라우저 localStorage에 개인정보를 남기지 않음
+  async function loadFromServer() {
+    if (!isAdmin()) return;
+    setLoading(true);
+    try {
+      const list = await fetchCustomers();
+      setCustomers(list);
+    } catch (err: any) {
+      alert(err.message || '고객 목록을 불러오지 못했습니다.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadFromServer();
+  }, []);
+
+  // 외부에서 갱신을 요청하면 서버에서 다시 불러옴
   useEffect(() => {
     if (refreshSignal === undefined) return;
-    setCustomers(loadCustomers());
+    loadFromServer();
   }, [refreshSignal]);
+
   const [search, setSearch] = useState('');
+  const [showDuplicatesOnly, setShowDuplicatesOnly] = useState(false);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -85,9 +111,9 @@ export default function Customers({ orders, refreshSignal }: { orders: Order[]; 
 
   const admin = isAdmin();
 
-  // URL 자가등록으로 새 고객이 병합되면 목록을 즉시 갱신
+  // 다른 기기에서 고객 정보가 변경되면(SSE) 서버에서 최신 목록을 다시 불러옴
   useEffect(() => {
-    const handler = () => setCustomers(loadCustomers());
+    const handler = () => loadFromServer();
     window.addEventListener('jc-customers-updated', handler);
     return () => window.removeEventListener('jc-customers-updated', handler);
   }, []);
@@ -102,9 +128,27 @@ export default function Customers({ orders, refreshSignal }: { orders: Order[]; 
     }
   }
 
+  // 이름+연락처가 같은 중복 고객 그룹 찾기 (고객등록 URL 중복 접수 정리용)
+  const duplicateIds = useMemo(() => {
+    const groups = new Map<string, Customer[]>();
+    customers.forEach((c) => {
+      const key = `${c.name.trim()}|${c.phone.replace(/\D/g, '')}`;
+      if (!key.replace('|', '')) return;
+      const list = groups.get(key) || [];
+      list.push(c);
+      groups.set(key, list);
+    });
+    const ids = new Set<string>();
+    groups.forEach((list) => {
+      if (list.length > 1) list.forEach((c) => ids.add(c.id));
+    });
+    return ids;
+  }, [customers]);
+
   const filtered = useMemo(() => {
     const term = search.trim();
-    return customers
+    const base = showDuplicatesOnly ? customers.filter((c) => duplicateIds.has(c.id)) : customers;
+    return base
       .filter((c) =>
         term
           ? c.name.includes(term) ||
@@ -113,8 +157,14 @@ export default function Customers({ orders, refreshSignal }: { orders: Order[]; 
             c.memo.includes(term)
           : true
       )
-      .sort((a, b) => a.name.localeCompare(b.name, 'ko'));
-  }, [customers, search]);
+      .sort((a, b) =>
+        showDuplicatesOnly
+          ? a.name.localeCompare(b.name, 'ko') ||
+            a.phone.localeCompare(b.phone) ||
+            a.createdAt.localeCompare(b.createdAt)
+          : a.name.localeCompare(b.name, 'ko')
+      );
+  }, [customers, search, showDuplicatesOnly, duplicateIds]);
 
   const orderCounts = useMemo(() => {
     const map = new Map<string, number>();
@@ -136,6 +186,15 @@ export default function Customers({ orders, refreshSignal }: { orders: Order[]; 
     setIsFormOpen(true);
   }
 
+  function handleOpenSms() {
+    const selected = customers.filter((c) => selectedIds.has(c.id));
+    if (selected.length === 0) {
+      alert('먼저 볂 고객을 선택해주세요.');
+      return;
+    }
+    onOpenSms?.(selected);
+  }
+
   function startEdit(customer: Customer) {
     setForm({
       name: customer.name,
@@ -153,44 +212,39 @@ export default function Customers({ orders, refreshSignal }: { orders: Order[]; 
     resetForm();
   }
 
-  function commitCustomers(next: Customer[]) {
-    setCustomers(next);
-    if (!saveSafely((v) => saveCustomers(v as Customer[]), next)) {
-      setCustomers(customers);
-    }
-  }
-
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!form.phone.trim()) {
       alert('연락처를 입력해주세요.');
       return;
     }
-    if (editingId) {
-      const updated = customers.map((c) =>
-        c.id === editingId ? { ...c, ...form } : c
-      );
-      commitCustomers(updated);
-    } else {
-      const newCustomer: Customer = {
-        ...form,
-        id: crypto.randomUUID(),
-        createdAt: new Date().toISOString(),
-      };
-      commitCustomers([...customers, newCustomer]);
+    try {
+      if (editingId) {
+        await updateCustomerApi(editingId, form);
+        await loadFromServer();
+      } else {
+        await createCustomer(form);
+        await loadFromServer();
+      }
+      resetForm();
+      setIsFormOpen(false);
+    } catch (err: any) {
+      alert(err.message || '저장 중 오류가 발생했습니다.');
     }
-    resetForm();
-    setIsFormOpen(false);
   }
 
-  function removeCustomer(id: string) {
-    if (confirm('이 고객을 삭제할까요?')) {
-      commitCustomers(customers.filter((c) => c.id !== id));
+  async function removeCustomer(id: string) {
+    if (!confirm('이 고객을 삭제할까요?')) return;
+    try {
+      await deleteCustomerApi(id);
+      await loadFromServer();
       setSelectedIds((prev) => {
         const next = new Set(prev);
         next.delete(id);
         return next;
       });
+    } catch (err: any) {
+      alert(err.message || '삭제 중 오류가 발생했습니다.');
     }
   }
 
@@ -223,11 +277,16 @@ export default function Customers({ orders, refreshSignal }: { orders: Order[]; 
     });
   }
 
-  function removeSelected() {
+  async function removeSelected() {
     if (selectedIds.size === 0) return;
     if (!confirm(`선택한 ${selectedIds.size}명의 고객을 삭제할까요?`)) return;
-    commitCustomers(customers.filter((c) => !selectedIds.has(c.id)));
-    setSelectedIds(new Set());
+    try {
+      await Promise.all(Array.from(selectedIds).map((id) => deleteCustomerApi(id)));
+      await loadFromServer();
+      setSelectedIds(new Set());
+    } catch (err: any) {
+      alert(err.message || '삭제 중 오류가 발생했습니다.');
+    }
   }
 
   function exportCustomers() {
@@ -250,7 +309,7 @@ export default function Customers({ orders, refreshSignal }: { orders: Order[]; 
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
         const data = new Uint8Array(event.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array' });
@@ -291,7 +350,12 @@ export default function Customers({ orders, refreshSignal }: { orders: Order[]; 
         }
 
         if (confirm(`${imported.length}명의 고객을 추가할까요?`)) {
-          commitCustomers([...customers, ...imported]);
+          try {
+            await Promise.all(imported.map((c) => createCustomer(c)));
+            await loadFromServer();
+          } catch (err: any) {
+            alert(err.message || '일부 고객을 추가하지 못했습니다.');
+          }
         }
       } catch (err) {
         alert('엑셀 파일을 읽는 중 오류가 발생했습니다.');
@@ -379,6 +443,11 @@ export default function Customers({ orders, refreshSignal }: { orders: Order[]; 
                 style={{ display: 'none' }}
                 onChange={handleFileSelect}
               />
+              {onOpenSms && (
+                <button className='btn' onClick={handleOpenSms} title='선택한 고객에게 문자를 발송합니다'>
+                  ✉️ 선택 문자 발송
+                </button>
+              )}
               <button className='btn btn-primary' onClick={openNewForm}>
                 + 새 고객
               </button>
@@ -419,6 +488,18 @@ export default function Customers({ orders, refreshSignal }: { orders: Order[]; 
               🗑 선택 삭제
             </button>
           </div>
+        )}
+        {admin && duplicateIds.size > 0 && (
+          <button
+            className={`btn ${showDuplicatesOnly ? 'btn-primary' : ''}`}
+            onClick={() => {
+              setShowDuplicatesOnly((prev) => !prev);
+              setSelectedIds(new Set());
+            }}
+            title='이름과 연락처가 같은 중복 고객만 모아서 보고 선택 삭제할 수 있습니다'
+          >
+            {showDuplicatesOnly ? '← 전체 보기' : `⚠ 중복 고객 ${duplicateIds.size}명 정리`}
+          </button>
         )}
       </section>
 

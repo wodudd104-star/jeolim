@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { Order, Product } from '../types';
+import PreparationSettings from './PreparationSettings';
 
 function formatCurrency(value: number) {
   return value.toLocaleString('ko-KR') + '원';
@@ -21,16 +22,26 @@ function getPaymentStatus(order: Order): string {
 type DashboardProps = {
   orders: Order[];
   products: Product[];
+  preparationDays: number;
+  canEditPreparation: boolean;
+  onSavePreparationDays: (days: number) => void;
   onNavigate: (page: 'orders') => void;
+  onStatusFilter?: (status: string) => void;
 };
 
-export default function Dashboard({ orders, products, onNavigate }: DashboardProps) {
+export default function Dashboard({ orders, products, preparationDays, canEditPreparation, onSavePreparationDays, onNavigate, onStatusFilter }: DashboardProps) {
+  function handleStatusClick(status: string) {
+    onStatusFilter?.(status);
+    onNavigate('orders');
+  }
   const stats = useMemo(() => {
-    const activeOrders = orders.filter((o) => o.status !== '취소');
+    const activeOrders = orders.filter((o) => o.status !== '취소' && o.status !== '환불완료');
     const totalQuantity = activeOrders.reduce((sum, o) => sum + o.quantity, 0);
     const totalRevenue = activeOrders.reduce((sum, o) => sum + o.totalPrice, 0);
     const totalDeposit = activeOrders.reduce((sum, o) => sum + o.depositAmount, 0);
-    const outstanding = totalRevenue - totalDeposit;
+    const outstanding = activeOrders
+      .filter((o) => o.status !== '환불완료')
+      .reduce((sum, o) => sum + (o.totalPrice - o.depositAmount), 0);
 
     const statusCounts: Record<string, number> = {
       접수: 0,
@@ -64,12 +75,38 @@ export default function Dashboard({ orders, products, onNavigate }: DashboardPro
       .sort((a, b) => +new Date(a.pickupDate) - +new Date(b.pickupDate))
       .slice(0, 5);
 
+    // 준비일/수령일이 7일 이내로 다가온 주문을 미리 알림으로 표시
+    const todayStart = new Date(new Date().toDateString());
+    const inDays = (dateStr?: string) => {
+      if (!dateStr) return null;
+      return Math.round((+new Date(dateStr) - +todayStart) / 86400000);
+    };
+    const dueAlerts = activeOrders
+      .map((o) => {
+        const prep = inDays(o.preparationDate);
+        const pickup = inDays(o.pickupDate);
+        const candidates = [
+          prep !== null && prep >= 0 && prep <= 7 ? { kind: '준비' as const, days: prep, date: o.preparationDate } : null,
+          pickup !== null && pickup >= 0 && pickup <= 7 ? { kind: '수령' as const, days: pickup, date: o.pickupDate } : null,
+        ].filter(Boolean) as { kind: '준비' | '수령'; days: number; date?: string }[];
+        if (candidates.length === 0) return null;
+        const soonest = candidates.sort((a, b) => a.days - b.days)[0];
+        return { order: o, ...soonest };
+      })
+      .filter(Boolean)
+      .sort((a, b) => (a!.days - b!.days) || (+new Date(a!.order.pickupDate) - +new Date(b!.order.pickupDate))) as {
+      order: Order;
+      kind: '준비' | '수령';
+      days: number;
+      date?: string;
+    }[];
+
     const recentOrders = [...orders]
       .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
       .slice(0, 5);
 
     return {
-      totalOrders: orders.length,
+      totalOrders: activeOrders.length,
       activeOrders: activeOrders.length,
       totalQuantity,
       totalRevenue,
@@ -79,6 +116,7 @@ export default function Dashboard({ orders, products, onNavigate }: DashboardPro
       paymentCounts,
       topProducts,
       upcomingPickups,
+      dueAlerts,
       recentOrders,
     };
   }, [orders]);
@@ -98,21 +136,15 @@ export default function Dashboard({ orders, products, onNavigate }: DashboardPro
           <span className='summary-label'>총 수량</span>
           <span className='summary-count'>{stats.totalQuantity}</span>
         </button>
-        <button className='summary-card revenue' onClick={() => onNavigate('orders')} title='주문관리로 이동'>
-          <span className='summary-label'>총 매출</span>
-          <span className='summary-count'>{formatCurrency(stats.totalRevenue)}</span>
-        </button>
-        <button className='summary-card' onClick={() => onNavigate('orders')} title='주문관리로 이동'>
-          <span className='summary-label'>총 입금</span>
-          <span className='summary-count'>{formatCurrency(stats.totalDeposit)}</span>
-        </button>
         <button
           className={`summary-card outstanding ${stats.outstanding > 0 ? 'alert' : ''}`}
           onClick={() => onNavigate('orders')}
-          title='미수금 확인 - 주문관리로 이동'
+          title='입금금액 확인 - 주문관리로 이동'
         >
-          <span className='summary-label'>미수금</span>
-          <span className='summary-count'>{formatCurrency(stats.outstanding)}</span>
+          <span className='summary-label'>{stats.outstanding > 0 ? '입금금액' : '입금완료'}</span>
+          <span className='summary-count'>
+            {stats.outstanding > 0 ? formatCurrency(stats.outstanding) : '입금완료'}
+          </span>
         </button>
       </section>
 
@@ -120,26 +152,40 @@ export default function Dashboard({ orders, products, onNavigate }: DashboardPro
         <section className='panel'>
           <h2>주문 상태 현황</h2>
           <div className='status-grid'>
-            {['접수', '준비중', '완료', '취소'].map((status) => (
-              <div key={status} className={`status-box status-${status}`}>
+            {(canEditPreparation ? ['접수', '준비중', '완료', '취소', '환불완료'] : ['접수', '준비중', '완료']).map((status) => (
+              <button
+                key={status}
+                type='button'
+                className={`status-box status-${status} status-box-btn`}
+                onClick={() => handleStatusClick(status)}
+                title={`주문관리에서 '${status}' 주문 보기`}
+              >
                 <span className='status-name'>{status}</span>
                 <span className='status-value'>{stats.statusCounts[status] || 0}건</span>
-              </div>
+              </button>
             ))}
           </div>
         </section>
 
+        {canEditPreparation && (
         <section className='panel'>
           <h2>입금 상태 현황</h2>
           <div className='status-grid'>
             {['미납', '부분납', '완납'].map((status) => (
-              <div key={status} className={`status-box payment-${status}`}>
+              <button
+                key={status}
+                type='button'
+                className={`status-box payment-${status} status-box-btn`}
+                onClick={() => handleStatusClick(status)}
+                title={`주문관리에서 '${status}' 주문 보기`}
+              >
                 <span className='status-name'>{status}</span>
                 <span className='status-value'>{stats.paymentCounts[status] || 0}건</span>
-              </div>
+              </button>
             ))}
           </div>
         </section>
+        )}
 
         <section className='panel'>
           <h2>인기 품목 TOP 5</h2>
@@ -158,6 +204,7 @@ export default function Dashboard({ orders, products, onNavigate }: DashboardPro
           )}
         </section>
 
+        {canEditPreparation && (
         <section className='panel'>
           <h2>다가오는 수령/배송</h2>
           {stats.upcomingPickups.length === 0 ? (
@@ -179,7 +226,44 @@ export default function Dashboard({ orders, products, onNavigate }: DashboardPro
             </ul>
           )}
         </section>
+        )}
 
+        {canEditPreparation && (
+          <PreparationSettings days={preparationDays} onSave={onSavePreparationDays} />
+        )}
+
+        {canEditPreparation && (
+        <section className='panel dashboard-wide'>
+          <h2>🔔 준비/수령 미리 알림 (7일 이내)</h2>
+          {stats.dueAlerts.length === 0 ? (
+            <div className='empty'>7일 이내 준비 또는 수령 예정 주문이 없습니다.</div>
+          ) : (
+            <ul className='simple-list'>
+              {stats.dueAlerts.map((a) => (
+                <li key={`${a.order.id}-${a.kind}`} onClick={() => onNavigate('orders')} style={{ cursor: 'pointer' }}>
+                  <div className='list-dates'>
+                    <span
+                      className={`tag ${a.days <= 1 ? 'highlight' : ''}`}
+                      style={a.days <= 1 ? { background: '#fef2f2', color: '#dc2626' } : undefined}
+                    >
+                      {a.kind}{' '}
+                      {a.days === 0 ? '오늘' : a.days === 1 ? '내일' : `D-${a.days}`}
+                    </span>
+                    <span className='tag'>{a.kind}일 {a.date ? formatDate(a.date) : '-'}</span>
+                    <span className={`tag status-${a.order.status}`}>{a.order.status}</span>
+                  </div>
+                  <div className='list-content'>
+                    {a.order.name} · {a.order.cabbageType} {a.order.quantity}{a.order.unit}
+                    {a.kind === '준비' && a.order.pickupDate ? ` · 수령 ${formatDate(a.order.pickupDate)}` : ''}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+        )}
+
+        {canEditPreparation && (
         <section className='panel dashboard-wide'>
           <h2>최근 접수 주문</h2>
           {stats.recentOrders.length === 0 ? (
@@ -202,6 +286,7 @@ export default function Dashboard({ orders, products, onNavigate }: DashboardPro
             </ul>
           )}
         </section>
+        )}
       </div>
     </div>
   );
