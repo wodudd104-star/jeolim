@@ -2257,6 +2257,47 @@ button.status-box-btn:hover {
   cursor: default;
 }
 
+.pay-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.pay-buttons .pay-button {
+  margin-top: 0;
+}
+
+.va-button {
+  background: #1d5a41;
+}
+
+.va-button:hover:not(:disabled) {
+  background: #123d2b;
+}
+
+.va-box {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1e40af;
+}
+
+.va-box .va-account {
+  font-size: 1.2rem;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  word-break: break-all;
+}
+
+.va-box .va-amount {
+  font-weight: 700;
+}
+
+.va-box .va-waiting {
+  font-size: 0.85rem;
+  color: #5f6b63;
+}
+
 .pay-complete-box {
   display: flex;
   flex-direction: column;

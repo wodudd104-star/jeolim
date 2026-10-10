@@ -112,7 +112,13 @@ export async function confirmPublicPayment(paymentKey: string, orderId: string, 
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || '결제 승인에 실패했습니다.');
-  return data as { ok: boolean; already?: boolean };
+  return data as {
+    ok: boolean;
+    already?: boolean;
+    paidAt?: string;
+    waitingDeposit?: boolean;
+    virtualAccount?: { bank: string; accountNumber: string; customerName: string; dueDate: string };
+  };
 }
 
 export async function fetchPublicPayments() {

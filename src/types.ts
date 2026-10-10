@@ -41,6 +41,12 @@ export type Order = {
   paidAt?: string;
   paidAmount?: number;
   paymentMethod?: string;
+  virtualAccount?: {
+    bank: string;
+    accountNumber: string;
+    customerName: string;
+    dueDate: string;
+  };
 };
 
 export type Customer = {

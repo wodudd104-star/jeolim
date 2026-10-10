@@ -3336,9 +3336,13 @@ function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?
       setPayLoading(true);
       setPayMessage({ kind: 'info', text: '결제를 확인하는 중입니다...' });
       confirmPublicPayment(paymentKey, payOrderId, amount)
-        .then(async () => {
+        .then(async (result) => {
           cleanUrl();
-          setPayMessage({ kind: 'info', text: '결제가 완료되었습니다. 감사합니다.' });
+          if (result?.waitingDeposit) {
+            setPayMessage({ kind: 'info', text: '가상계좌가 발급되었습니다. 아래 계좌로 입금해주세요.' });
+          } else {
+            setPayMessage({ kind: 'info', text: '결제가 완료되었습니다. 감사합니다.' });
+          }
           const remote = await fetchPublicOrder(orderId).catch(() => null);
           if (remote) setOrder(remote);
         })
@@ -3373,13 +3377,17 @@ function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?
     };
   }, [orderId]);
 
-  async function handlePay(balance: number) {
+  async function handlePay(balance: number, method: 'CARD' | 'VIRTUAL_ACCOUNT' = 'CARD') {
     if (!order) return;
     if (!TOSS_CLIENT_KEY) {
       setPayMessage({
         kind: 'error',
         text: '결제 설정이 완료되지 않았습니다. 관리자에게 문의해주세요.',
       });
+      return;
+    }
+    if (method === 'VIRTUAL_ACCOUNT' && !order.name?.trim()) {
+      setPayMessage({ kind: 'error', text: '가상계좌 발급에는 주문자 이름이 필요합니다.' });
       return;
     }
     setPayLoading(true);
@@ -3390,7 +3398,7 @@ function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?
       const url = new URL(window.location.origin + window.location.pathname);
       url.searchParams.set('order', orderId);
       await payment.requestPayment({
-        method: 'CARD',
+        method,
         amount: { currency: 'KRW', value: balance },
         orderId,
         orderName: `${order.cabbageType} ${order.quantity}${order.unit}`,
@@ -3584,17 +3592,44 @@ function PublicOrderView({ orderId, localOrder }: { orderId: string; localOrder?
               </span>
             </div>
           ) : (
-            balance > 0 &&
-            order.status !== '취소' && (
-              <button
-                type='button'
-                className='pay-button'
-                disabled={payLoading}
-                onClick={() => handlePay(balance)}
-              >
-                {payLoading ? '결제 준비 중...' : `💳 잔액 결제하기 ${formatCurrency(balance)}`}
-              </button>
-            )
+            <>
+              {order.virtualAccount && order.paymentMethod === '가상계좌' && (
+                <div className='pay-complete-box va-box'>
+                  <strong>🏦 가상계좌 입금 안내</strong>
+                  <span className='va-account'>
+                    {order.virtualAccount.bank} {order.virtualAccount.accountNumber}
+                  </span>
+                  <span>예금주: {order.virtualAccount.customerName || order.name}</span>
+                  <span className='va-amount'>입금액: {formatCurrency(balance)}</span>
+                  {order.virtualAccount.dueDate && (
+                    <span>입금기한: {formatDate(order.virtualAccount.dueDate)}</span>
+                  )}
+                  <span className='va-waiting'>입금 확인 후 자동으로 결제 완료 처리됩니다.</span>
+                </div>
+              )}
+              {balance > 0 &&
+                order.status !== '취소' &&
+                !order.virtualAccount && (
+                  <div className='pay-buttons'>
+                    <button
+                      type='button'
+                      className='pay-button'
+                      disabled={payLoading}
+                      onClick={() => handlePay(balance, 'CARD')}
+                    >
+                      {payLoading ? '결제 준비 중...' : `💳 카드결제 ${formatCurrency(balance)}`}
+                    </button>
+                    <button
+                      type='button'
+                      className='pay-button va-button'
+                      disabled={payLoading}
+                      onClick={() => handlePay(balance, 'VIRTUAL_ACCOUNT')}
+                    >
+                      🏦 가상계좌 입금
+                    </button>
+                  </div>
+                )}
+            </>
           )}
 
           {order.status !== '완료' && order.status !== '취소' && (

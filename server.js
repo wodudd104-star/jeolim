@@ -1760,6 +1760,21 @@ app.post('/api/public/payment/confirm', paymentLimiter, async (req, res) => {
       if (!tossRes.ok) {
         return res.status(402).json({ error: tossData.message || '결제 승인에 실패했습니다.' });
       }
+      // 가상계좌 발급: 입금 전까지는 결제완료로 간주하지 않고 계좌 정보만 저장
+      const va = tossData.virtualAccount;
+      if (tossData.method === '가상계좌' && va && (va.accountNumber || va.bank)) {
+        order.paymentMethod = '가상계좌';
+        order.virtualAccount = {
+          bank: va.bank || '',
+          accountNumber: va.accountNumber || '',
+          customerName: va.customerName || order.name || '',
+          dueDate: va.dueDate || '',
+        };
+        order.vaIssuedAt = new Date().toISOString();
+        await storeWrite('public_orders', PUBLIC_ORDERS_FILE, store);
+        broadcastChange('payment', null);
+        return res.json({ ok: true, virtualAccount: order.virtualAccount, waitingDeposit: true });
+      }
       order.paid = true;
       order.paidAt = new Date().toISOString();
       order.paidAmount = numericAmount;
@@ -1774,6 +1789,42 @@ app.post('/api/public/payment/confirm', paymentLimiter, async (req, res) => {
     }
   } catch {
     return res.status(500).json({ error: '결제 처리 중 오류가 발생했습니다.' });
+  }
+});
+
+// 토스 웹훅: 가상계좌 입금 완료(PAYMENT_STATUS_CHANGED → DONE) 시 주문을 완납 처리
+// 웹훅 페이로드 자체는 신뢰하지 않고, 시크릿 키로 토스 API에서 결제를 다시 조회해 확인한다.
+app.post('/api/public/payment/webhook', async (req, res) => {
+  try {
+    const data = req.body?.data || {};
+    const paymentKey = String(data.paymentKey || '');
+    const status = String(data.status || '');
+    if (!paymentKey || status !== 'DONE') return res.json({ ok: true, ignored: true });
+    const auth = Buffer.from(`${TOSS_SECRET_KEY}:`).toString('base64');
+    const checkRes = await fetch(`https://api.tosspayments.com/v1/payments/${encodeURIComponent(paymentKey)}`, {
+      headers: { Authorization: `Basic ${auth}` },
+    });
+    const check = await checkRes.json().catch(() => ({}));
+    if (!checkRes.ok || check.status !== 'DONE') return res.json({ ok: true, ignored: true });
+    const orderId = String(check.orderId || '');
+    const total = Number(check.totalAmount || 0);
+    if (!orderId || total <= 0) return res.json({ ok: true, ignored: true });
+    const store = await storeRead('public_orders', PUBLIC_ORDERS_FILE, { orders: {} });
+    const order = store.orders?.[orderId];
+    if (!order) return res.json({ ok: true, ignored: true });
+    if (!order.paid) {
+      order.paid = true;
+      order.paidAt = new Date().toISOString();
+      order.paidAmount = total;
+      order.paymentKey = paymentKey;
+      order.paymentMethod = '가상계좌';
+      order.depositAmount = Number(order.totalPrice || 0);
+      await storeWrite('public_orders', PUBLIC_ORDERS_FILE, store);
+      broadcastChange('payment', null);
+    }
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '웹훅 처리 중 오류가 발생했습니다.' });
   }
 });
 
