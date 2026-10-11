@@ -704,8 +704,34 @@ export default function App() {
     return value;
   }, []);
 
+  const hydratedRef = useRef(false);
   const syncNow = useCallback(async () => {
     if (!isLoggedIn()) return;
+    // 하이드레이션 전에는 절대 저장(push)하지 않는다.
+    // 로그인 직후 앱이 서버 데이터를 받아오기 전에 빈 목록을 저장하면
+    // 서버의 주문/고객이 전부 지워지는 사고가 발생했었다.
+    // 첫 풀이 성공하기 전까지는 풀만 수행한다.
+    if (!hydratedRef.current) {
+      try {
+        const first = (await fetchAllAppData()) as Record<string, unknown> | null;
+        if (first) {
+          for (const [key, lsKey] of Object.entries(SYNC_KEYS)) {
+            const serverValue = (first as any)[key];
+            if (serverValue === undefined || serverValue === null) continue;
+            const applied = applyServerValue(key, serverValue);
+            lastSyncedRef.current[key] = JSON.stringify(
+              key === 'orders' || key === 'products'
+                ? applied
+                : safeParse(localStorage.getItem(lsKey) || 'null') ?? applied
+            );
+          }
+          hydratedRef.current = true;
+        }
+      } catch {
+        // 서버 조회 실패 시 다음 주기에 재시도 (저장은 계속 보류)
+      }
+      return;
+    }
     // 먼저 서버의 최신 데이터를 확인한다 (풀).
     // - 로컬에 변경이 없는 키는 서버 값을 적용해 오래 떠 있던 기기(SSE 끊김)의
     //   화면을 최신 상태로 되돌린다. 과거 데이터를 들고 저장하는 사고를 막는다.
