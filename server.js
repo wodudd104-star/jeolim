@@ -51,6 +51,23 @@ import {
   getGalleryDb,
   setGalleryDb,
   migrateGalleryFromFile,
+  ensureMaterialsTable,
+  ensureMaterialsDeletedTable,
+  listMaterials,
+  insertMaterial,
+  deleteMaterialDb,
+  addMaterialTombstone,
+  listMaterialTombstones,
+  migrateMaterialsFromStore,
+  hasDb,
+  ensureAppDataKeysTable,
+  appKeyGet,
+  appKeySet,
+  migrateAppDataKeysFromStore,
+  ensureReceiptsTable,
+  saveReceipt,
+  getReceipt,
+  migrateMaterialReceipts,
 } from './src/lib/db.js';
 
 config();
@@ -59,7 +76,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(express.json({ limit: '20mb' }));
+// strict: false — 숫자/문자열 등 스칼라 JSON 본문도 허용 (준비일 설정 등)
+app.use(express.json({ limit: '20mb', strict: false }));
 app.use(cookieParser());
 // 외부 트래픽은 Tailscale Funnel이 localhost:3000으로 프록시해서 전달함.
 // 프록시로 신뢰하는 주소를 loopback으로 제한 → LAN에서 직접 접속하며
@@ -1279,6 +1297,48 @@ app.delete('/api/orders/:id', requireAdmin, async (req, res) => {
   }
 });
 
+// 자재 개별 삭제 (관리자 전용). 삭제 기록(tombstone)을 남겨
+// 오래된 기기의 전체 동기화가 삭제된 자재를 되살리지 못하게 한다.
+app.delete('/api/materials/:id', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await addMaterialTombstone(id);
+    await deleteMaterialDb(id);
+    broadcastChange('materials', req.headers['x-client-id']);
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '자재 삭제에 실패했습니다.' });
+  }
+});
+
+// 영수증 사진 저장 (관리자 전용). 사진은 receipts 테이블에 별도 보관하고
+// 자재 데이터에는 참조 ID만 남겨 localStorage 용량 문제를 방지한다.
+app.post('/api/receipts', requireAdmin, async (req, res) => {
+  try {
+    const { id, data } = req.body || {};
+    if (!id || typeof id !== 'string' || typeof data !== 'string' || !data.startsWith('data:image/')) {
+      return res.status(400).json({ error: '잘못된 영수증 데이터입니다.' });
+    }
+    if (data.length > 5 * 1024 * 1024) {
+      return res.status(413).json({ error: '영수증 사진이 너무 큽니다. 다시 촬영해주세요.' });
+    }
+    await saveReceipt(id, data);
+    return res.json({ ok: true });
+  } catch {
+    return res.status(500).json({ error: '영수증 저장에 실패했습니다.' });
+  }
+});
+
+app.get('/api/receipts/:id', requireAdmin, async (req, res) => {
+  try {
+    const data = await getReceipt(req.params.id);
+    if (data === null) return res.status(404).json({ error: '영수증을 찾을 수 없습니다.' });
+    return res.json({ id: req.params.id, data });
+  } catch {
+    return res.status(500).json({ error: '영수증 조회에 실패했습니다.' });
+  }
+});
+
 app.get('/api/data/all', requireAuth, async (req, res) => {
   try {
     const store = await storeRead('app_data', APP_DATA_FILE, {});
@@ -1291,8 +1351,25 @@ app.get('/api/data/all', requireAuth, async (req, res) => {
       } else if (key === 'customers') {
         const fromDb = await listCustomers();
         out[key] = fromDb !== null ? fromDb : (store[key] ? store[key].value : undefined);
+      } else if (key === 'materials') {
+        const fromDb = await listMaterials();
+        out[key] = fromDb !== null ? fromDb : (store[key] ? store[key].value : undefined);
       } else {
-        out[key] = store[key] ? store[key].value : undefined;
+        const fromDb = await appKeyGet(key);
+        out[key] = fromDb != null ? fromDb : (store[key] ? store[key].value : undefined);
+      }
+    }
+    // 자재는 DB 전용 테이블에서 관리 — 스토어에 키가 없어도 항상 DB 값을 제공
+    if (out.materials === undefined) {
+      const matsFromDb = await listMaterials();
+      if (matsFromDb !== null) out.materials = matsFromDb;
+    }
+    // 키별 DB 저장 데이터(품목/단가, 계좌 등) — 스토어에 키가 없어도 DB 값을 제공
+    for (const key of APP_DATA_KEYS) {
+      if (key === 'orders' || key === 'customers' || key === 'materials') continue;
+      if (out[key] === undefined) {
+        const fromDb = await appKeyGet(key);
+        if (fromDb != null) out[key] = fromDb;
       }
     }
     // 일반회원은 본인 데이터만 조회 가능 (개인정보 보호)
@@ -1403,6 +1480,32 @@ app.put('/api/data/:key', requireAuth, async (req, res) => {
         broadcastChange('orders', req.headers['x-client-id']);
         return res.json({ ok: true });
       }
+    }
+
+    // 자재구입목록: DB 전용 테이블에 실시간 저장 (주문과 동일한 upsert 방식).
+    // 오래된 기기가 빈/오래된 목록을 보내도 삭제 기록(tombstone)에 없는
+    // 항목은 upsert되고, 서버의 다른 자재 내역이 지워지지 않는다.
+    // 자재 삭제는 DELETE /api/materials/:id 로만 처리된다.
+    if (key === 'materials' && Array.isArray(req.body)) {
+      const fromDb = await listMaterials();
+      if (fromDb !== null) {
+        const tombstones = await listMaterialTombstones();
+        const toStore = req.body.filter((m) => m && m.id && !tombstones.has(m.id));
+        for (const m of toStore) {
+          await insertMaterial(m);
+        }
+        broadcastChange('materials', req.headers['x-client-id']);
+        return res.json({ ok: true });
+      }
+    }
+
+    // 나머지 앱 데이터(품목/단가, 계좌, 갤러리 공지, 준비일 등): 키별 DB 행으로
+    // 실시간 저장. 단일 블롭을 통째로 덮어쓰지 않으므로 다른 키 데이터가
+    // 오래된 기기 동기화로 지워지는 사고가 발생하지 않는다.
+    if (hasDb()) {
+      await appKeySet(key, req.body);
+      broadcastChange(key, req.headers['x-client-id']);
+      return res.json({ ok: true });
     }
 
     const store = await storeRead('app_data', APP_DATA_FILE, {});
@@ -2040,6 +2143,8 @@ const PORT = process.env.PORT || 3000;
   try {
     const dbUrlSet = !!process.env.DATABASE_URL;
     console.log(`[STARTUP] DATABASE_URL ${dbUrlSet ? 'is set' : 'is NOT set'} (storage: ${dbUrlSet ? 'PostgreSQL' : 'local JSON'})`);
+    const ordersDbUrlSet = !!process.env.ORDERS_DATABASE_URL;
+    console.log(`[STARTUP] ORDERS_DATABASE_URL ${ordersDbUrlSet ? 'is set (orders -> separate DB)' : 'is NOT set (orders -> main DB)'}`);
     await ensureUsersTable();
     await migrateUsersFromFile();
     await ensureKvTable();
@@ -2047,12 +2152,23 @@ const PORT = process.env.PORT || 3000;
     await ensureOrdersTable();
     await ensureOrderTombstonesTable();
     await ensureGalleryTable();
+    await ensureMaterialsTable();
+    await ensureMaterialsDeletedTable();
+    await ensureAppDataKeysTable();
+    await ensureReceiptsTable();
+    await migrateAppDataKeysFromStore(
+      [...APP_DATA_KEYS].filter((k) => k !== 'orders' && k !== 'customers' && k !== 'materials')
+    );
     // DB로 저장 방식을 전환하면서 기존 JSON 파일 데이터가 있으면 한 번만 마이그레이션
     await migrateCustomersFromFile(CUSTOMERS_FILE);
     await migrateOrdersFromFile(PUBLIC_ORDERS_FILE);
     await migrateGalleryFromFile(PUBLIC_GALLERY_FILE);
     await loadSessions();
     await migrateJsonToDb();
+    // 기존 app_kv(app_data)에 남아 있던 자재 데이터를 전용 테이블로 이관
+    await migrateMaterialsFromStore();
+    // 자재에 인라인으로 저장된 영수증 사진을 receipts 테이블로 이관 (참조 ID 방식 전환)
+    await migrateMaterialReceipts();
     // DB 모드 첫 부팅 시 이미지에 포함된 JSON 데이터를 DB로 이관
     if (hasKv()) {
       for (const [kvKey, file, fallback] of [

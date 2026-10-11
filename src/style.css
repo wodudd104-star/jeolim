@@ -1530,6 +1530,10 @@ button.status-box-btn:hover {
   background: #f9fafb;
 }
 
+.recipient-search {
+  margin-bottom: 8px;
+}
+
 .recipient-row {
   display: flex;
   align-items: center;

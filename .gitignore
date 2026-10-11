@@ -7,12 +7,7 @@ test-notify.js
 main-image.b64
 main-image-clean.b64
 data/
-src/lib/data/auth.json
-src/lib/data/auth.json.bak-*
-src/lib/data/members-backup.json
-src/lib/data/customer-intake.json
-src/lib/data/sessions.json
-src/lib/data/signups.json
-src/lib/data/customers.json
-src/lib/data/account-numbers.json
+src/lib/data/*.json
+src/lib/data/*.json.bak-*
+!src/lib/data/.gitkeep
 

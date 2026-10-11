@@ -11,11 +11,14 @@ const __dirname = path.dirname(__filename);
 const AUTH_FILE = path.join(__dirname, 'data', 'auth.json');
 const AUTH_BACKUP_FILE = path.join(__dirname, 'data', 'members-backup.json');
 const DATABASE_URL = process.env.DATABASE_URL;
+// 주문내역 전용 DB (미설정 시 기본 DATABASE_URL 사용)
+const ORDERS_DATABASE_URL = process.env.ORDERS_DATABASE_URL || process.env.DATABASE_URL;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
 const SALT_ROUNDS = 12;
 
 let pool = null;
+let ordersPool = null;
 
 export function initDb() {
   if (!DATABASE_URL) return null;
@@ -27,6 +30,19 @@ export function initDb() {
     },
   });
   return pool;
+}
+
+// 주문내역 전용 연결 (별도 DB 지정 시 분리 저장)
+export function initOrdersDb() {
+  if (!ORDERS_DATABASE_URL) return null;
+  if (ordersPool) return ordersPool;
+  ordersPool = new pg.Pool({
+    connectionString: ORDERS_DATABASE_URL,
+    ssl: {
+      rejectUnauthorized: false,
+    },
+  });
+  return ordersPool;
 }
 
 export async function ensureUsersTable() {
@@ -467,10 +483,73 @@ export async function ensureCustomersTable() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `);
+  // 고객 개인정보를 각각의 개별 컬럼으로 저장 (이름/전화번호/주소/상세주소/메모/도착일/수량/수령방법)
+  await db.query(`
+    ALTER TABLE customers
+      ADD COLUMN IF NOT EXISTS name TEXT,
+      ADD COLUMN IF NOT EXISTS phone TEXT,
+      ADD COLUMN IF NOT EXISTS address TEXT,
+      ADD COLUMN IF NOT EXISTS address_detail TEXT,
+      ADD COLUMN IF NOT EXISTS memo TEXT,
+      ADD COLUMN IF NOT EXISTS arrival_date TEXT,
+      ADD COLUMN IF NOT EXISTS quantity INTEGER,
+      ADD COLUMN IF NOT EXISTS receive_method TEXT,
+      ADD COLUMN IF NOT EXISTS app_created_at TEXT
+  `);
+  // 검색용 인덱스
+  await db.query('CREATE INDEX IF NOT EXISTS idx_customers_name ON customers (name)');
+  await db.query('CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers (phone)');
+  // 기존 JSONB 블롭 데이터를 개별 컬럼으로 1회 백필
+  await db.query(`
+    UPDATE customers SET
+      name = data->>'name',
+      phone = data->>'phone',
+      address = data->>'address',
+      address_detail = data->>'addressDetail',
+      memo = data->>'memo',
+      arrival_date = data->>'arrivalDate',
+      quantity = CASE WHEN data->>'quantity' ~ '^[0-9]+$' THEN (data->>'quantity')::int ELSE NULL END,
+      receive_method = data->>'receiveMethod',
+      app_created_at = data->>'createdAt'
+    WHERE name IS NULL
+  `);
+}
+
+// 개별 컬럼에 저장할 값 추출
+function customerColumnValues(c) {
+  return {
+    name: c.name ?? null,
+    phone: c.phone ?? null,
+    address: c.address ?? null,
+    addressDetail: c.addressDetail ?? null,
+    memo: c.memo ?? null,
+    arrivalDate: c.arrivalDate ?? null,
+    quantity: typeof c.quantity === 'number' ? c.quantity : null,
+    receiveMethod: c.receiveMethod ?? null,
+    createdAt: c.createdAt ?? null,
+  };
+}
+
+// 개별 컬럼 행을 API용 고객 객체로 복원 (컬럼이 비어 있으면 JSONB 폴백)
+function customerFromRow(row) {
+  if (row.name === null && row.data) return row.data;
+  return {
+    ...(row.data || {}),
+    id: row.id,
+    name: row.name ?? row.data?.name ?? '',
+    phone: row.phone ?? row.data?.phone ?? '',
+    address: row.address ?? row.data?.address ?? '',
+    addressDetail: row.address_detail ?? row.data?.addressDetail ?? undefined,
+    memo: row.memo ?? row.data?.memo ?? '',
+    arrivalDate: row.arrival_date ?? row.data?.arrivalDate ?? undefined,
+    quantity: row.quantity ?? row.data?.quantity ?? undefined,
+    receiveMethod: row.receive_method ?? row.data?.receiveMethod ?? undefined,
+    createdAt: row.app_created_at ?? row.data?.createdAt ?? '',
+  };
 }
 
 export async function ensureOrdersTable() {
-  const db = initDb();
+  const db = initOrdersDb();
   if (!db) return;
   await db.query(`
     CREATE TABLE IF NOT EXISTS orders (
@@ -485,8 +564,13 @@ export async function ensureOrdersTable() {
 export async function listCustomers() {
   const db = initDb();
   if (db) {
-    const result = await db.query("SELECT data FROM customers ORDER BY data->>'name'");
-    return result.rows.map((r) => r.data);
+    const result = await db.query(`
+      SELECT id, data, name, phone, address, address_detail, memo,
+             arrival_date, quantity, receive_method, app_created_at
+      FROM customers
+      ORDER BY COALESCE(name, data->>'name')
+    `);
+    return result.rows.map(customerFromRow);
   }
   return null;
 }
@@ -494,10 +578,36 @@ export async function listCustomers() {
 export async function insertCustomer(customer) {
   const db = initDb();
   if (db) {
+    const v = customerColumnValues(customer);
     await db.query(
-      `INSERT INTO customers (id, data, updated_at) VALUES ($1, $2, NOW())
-       ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
-      [customer.id, JSON.stringify(customer)]
+      `INSERT INTO customers (id, data, name, phone, address, address_detail, memo,
+                              arrival_date, quantity, receive_method, app_created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+       ON CONFLICT (id) DO UPDATE SET
+         data = EXCLUDED.data,
+         name = EXCLUDED.name,
+         phone = EXCLUDED.phone,
+         address = EXCLUDED.address,
+         address_detail = EXCLUDED.address_detail,
+         memo = EXCLUDED.memo,
+         arrival_date = EXCLUDED.arrival_date,
+         quantity = EXCLUDED.quantity,
+         receive_method = EXCLUDED.receive_method,
+         app_created_at = EXCLUDED.app_created_at,
+         updated_at = NOW()`,
+      [
+        customer.id,
+        JSON.stringify(customer),
+        v.name,
+        v.phone,
+        v.address,
+        v.addressDetail,
+        v.memo,
+        v.arrivalDate,
+        v.quantity,
+        v.receiveMethod,
+        v.createdAt,
+      ]
     );
     return;
   }
@@ -507,9 +617,31 @@ export async function insertCustomer(customer) {
 export async function updateCustomerDb(id, patch) {
   const db = initDb();
   if (db) {
+    // 현재 데이터에 패치를 병합한 뒤 개별 컬럼도 함께 갱신
+    const cur = await db.query('SELECT data FROM customers WHERE id = $1', [id]);
+    if (!cur.rows[0]) return;
+    const merged = { ...(cur.rows[0].data || {}), ...patch };
+    const v = customerColumnValues(merged);
     await db.query(
-      `UPDATE customers SET data = data || $2::jsonb, updated_at = NOW() WHERE id = $1`,
-      [id, JSON.stringify(patch)]
+      `UPDATE customers SET
+         data = data || $2::jsonb,
+         name = $3, phone = $4, address = $5, address_detail = $6, memo = $7,
+         arrival_date = $8, quantity = $9, receive_method = $10, app_created_at = $11,
+         updated_at = NOW()
+       WHERE id = $1`,
+      [
+        id,
+        JSON.stringify(patch),
+        v.name,
+        v.phone,
+        v.address,
+        v.addressDetail,
+        v.memo,
+        v.arrivalDate,
+        v.quantity,
+        v.receiveMethod,
+        v.createdAt,
+      ]
     );
     return;
   }
@@ -526,7 +658,7 @@ export async function deleteCustomerDb(id) {
 }
 
 export async function listOrders() {
-  const db = initDb();
+  const db = initOrdersDb();
   if (db) {
     const result = await db.query("SELECT data FROM orders ORDER BY data->>'createdAt' DESC");
     return result.rows.map((r) => r.data);
@@ -535,7 +667,7 @@ export async function listOrders() {
 }
 
 export async function getOrderDb(id) {
-  const db = initDb();
+  const db = initOrdersDb();
   if (db) {
     const result = await db.query('SELECT data FROM orders WHERE id = $1', [id]);
     return result.rows[0] ? result.rows[0].data : null;
@@ -544,7 +676,7 @@ export async function getOrderDb(id) {
 }
 
 export async function insertOrder(order) {
-  const db = initDb();
+  const db = initOrdersDb();
   if (db) {
     await db.query(
       `INSERT INTO orders (id, data, updated_at) VALUES ($1, $2, NOW())
@@ -557,7 +689,7 @@ export async function insertOrder(order) {
 }
 
 export async function updateOrderDb(id, order) {
-  const db = initDb();
+  const db = initOrdersDb();
   if (db) {
     await db.query(
       `UPDATE orders SET data = $2::jsonb, updated_at = NOW() WHERE id = $1`,
@@ -569,7 +701,7 @@ export async function updateOrderDb(id, order) {
 }
 
 export async function deleteOrderDb(id) {
-  const db = initDb();
+  const db = initOrdersDb();
   if (db) {
     await db.query('DELETE FROM orders WHERE id = $1', [id]);
     return;
@@ -580,7 +712,7 @@ export async function deleteOrderDb(id) {
 // 삭제된 주문 ID 기록(tombstone).
 // 전체 동기화(목록 통째로 저장)에서 오래된 기기가 삭제된 주문을 되살리는 것을 막는다.
 export async function ensureOrderTombstonesTable() {
-  const db = initDb();
+  const db = initOrdersDb();
   if (!db) return;
   await db.query(`
     CREATE TABLE IF NOT EXISTS orders_deleted (
@@ -591,7 +723,7 @@ export async function ensureOrderTombstonesTable() {
 }
 
 export async function addOrderTombstone(id) {
-  const db = initDb();
+  const db = initOrdersDb();
   if (!db) return;
   await db.query(
     'INSERT INTO orders_deleted (id) VALUES ($1) ON CONFLICT (id) DO NOTHING',
@@ -600,7 +732,7 @@ export async function addOrderTombstone(id) {
 }
 
 export async function listOrderTombstones() {
-  const db = initDb();
+  const db = initOrdersDb();
   if (!db) return new Set();
   const result = await db.query('SELECT id FROM orders_deleted');
   return new Set(result.rows.map((r) => r.id));
@@ -626,7 +758,7 @@ export async function migrateCustomersFromFile(filePath) {
 }
 
 export async function migrateOrdersFromFile(filePath) {
-  const db = initDb();
+  const db = initOrdersDb();
   if (!db) return;
   const fsSync = (await import('fs')).default;
   if (!fsSync.existsSync(filePath)) return;
@@ -699,5 +831,230 @@ export async function migrateGalleryFromFile(filePath) {
     await setGalleryDb(store.items || [], store.notice || '');
   } catch (err) {
     console.error('[MIGRATE gallery] 실패:', err.message);
+  }
+}
+
+// ===== 자재구입목록 전용 테이블 =====
+// 자재 데이터를 app_kv 단일 블롭에서 분리해 주문/고객과 동일한 방식으로
+// 서버 DB에 실시간 저장한다. 오래된 기기의 전체 동기화가 자재를 지우는 사고 방지.
+
+export async function ensureMaterialsTable() {
+  const db = initDb();
+  if (!db) return;
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS materials (
+      id TEXT PRIMARY KEY,
+      data JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+export async function ensureMaterialsDeletedTable() {
+  const db = initDb();
+  if (!db) return;
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS materials_deleted (
+      id TEXT PRIMARY KEY,
+      deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+export async function listMaterials() {
+  const db = initDb();
+  if (db) {
+    const result = await db.query("SELECT data FROM materials ORDER BY data->>'date' DESC, data->>'createdAt' DESC");
+    return result.rows.map((r) => r.data);
+  }
+  return null;
+}
+
+export async function insertMaterial(material) {
+  const db = initDb();
+  if (db) {
+    await db.query(
+      `INSERT INTO materials (id, data, updated_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+      [material.id, JSON.stringify(material)]
+    );
+    return;
+  }
+  return null;
+}
+
+export async function deleteMaterialDb(id) {
+  const db = initDb();
+  if (db) {
+    await db.query('DELETE FROM materials WHERE id = $1', [id]);
+    return;
+  }
+  return null;
+}
+
+export async function addMaterialTombstone(id) {
+  const db = initDb();
+  if (!db) return;
+  await db.query(
+    'INSERT INTO materials_deleted (id) VALUES ($1) ON CONFLICT (id) DO NOTHING',
+    [id]
+  );
+}
+
+export async function listMaterialTombstones() {
+  const db = initDb();
+  if (!db) return new Set();
+  const result = await db.query('SELECT id FROM materials_deleted');
+  return new Set(result.rows.map((r) => r.id));
+}
+
+// ===== 앱 데이터 키별 저장 (품목/단가, 계좌 등 전체 DB 실시간 연동) =====
+// app_kv(app_data) 단일 블롭 덮어쓰기 사고를 방지하기 위해 키마다 개별 행으로 저장한다.
+
+export function hasDb() {
+  return !!initDb();
+}
+
+export async function ensureAppDataKeysTable() {
+  const db = initDb();
+  if (!db) return;
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS app_data_keys (
+      key TEXT PRIMARY KEY,
+      value JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+// 반환값: null = DB 미사용, undefined = 행 없음, 그 외 = 저장된 값
+export async function appKeyGet(key) {
+  const db = initDb();
+  if (!db) return null;
+  const result = await db.query('SELECT value FROM app_data_keys WHERE key = $1', [key]);
+  return result.rows[0] ? result.rows[0].value : undefined;
+}
+
+export async function appKeySet(key, value) {
+  const db = initDb();
+  if (!db) return;
+  await db.query(
+    `INSERT INTO app_data_keys (key, value, updated_at) VALUES ($1, $2, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+    [key, JSON.stringify(value)]
+  );
+}
+
+// 기존 app_kv(app_data) 블롭에 남아 있는 키들을 키별 테이블로 한 번만 이관
+export async function migrateAppDataKeysFromStore(keys) {
+  const db = initDb();
+  if (!db) return;
+  try {
+    const store = await kvGet('app_data');
+    if (!store || typeof store !== 'object') return;
+    for (const key of keys) {
+      const existing = await db.query('SELECT 1 FROM app_data_keys WHERE key = $1', [key]);
+      if (existing.rows.length > 0) continue;
+      const entry = store[key];
+      if (entry === undefined) continue;
+      // 스토어 형식은 { value, savedAt } 또는 원본 값
+      const value = entry && typeof entry === 'object' && !Array.isArray(entry) && 'value' in entry
+        ? entry.value
+        : entry;
+      if (value === undefined) continue;
+      await db.query(
+        'INSERT INTO app_data_keys (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING',
+        [key, JSON.stringify(value)]
+      );
+    }
+  } catch (err) {
+    console.error('[MIGRATE app_data_keys] 실패:', err.message);
+  }
+}
+
+// ===== 영수증 사진 전용 테이블 =====
+// 영수증 base64를 자재 데이터에 인라인으로 넣으면 localStorage 한도 초과와
+// 동기화 비대화를 유발하므로, 사진은 이 테이블에 별도 저장하고 자재에는 참조 ID만 둔다.
+
+export async function ensureReceiptsTable() {
+  const db = initDb();
+  if (!db) return;
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS receipts (
+      id TEXT PRIMARY KEY,
+      data TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+}
+
+export async function saveReceipt(id, data) {
+  const db = initDb();
+  if (!db) return;
+  await db.query(
+    `INSERT INTO receipts (id, data, updated_at) VALUES ($1, $2, NOW())
+     ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+    [id, data]
+  );
+}
+
+// 없으면 null 반환
+export async function getReceipt(id) {
+  const db = initDb();
+  if (!db) return null;
+  const result = await db.query('SELECT data FROM receipts WHERE id = $1', [id]);
+  return result.rows[0] ? result.rows[0].data : null;
+}
+
+// 기존 자재에 인라인으로 들어 있던 영수증을 receipts 테이블로 1회 이관
+export async function migrateMaterialReceipts() {
+  const db = initDb();
+  if (!db) return;
+  try {
+    const result = await db.query(
+      "SELECT id, data FROM materials WHERE data->>'receipt' IS NOT NULL AND data->>'receipt' <> ''"
+    );
+    for (const row of result.rows) {
+      const receipt = row.data.receipt;
+      await saveReceipt(row.id, receipt);
+      const updated = { ...row.data, receiptId: row.id };
+      delete updated.receipt;
+      await db.query('UPDATE materials SET data = $2, updated_at = NOW() WHERE id = $1', [
+        row.id,
+        JSON.stringify(updated),
+      ]);
+    }
+    if (result.rows.length > 0) {
+      console.log(`[MIGRATE receipts] ${result.rows.length}건 이관 완료`);
+    }
+  } catch (err) {
+    console.error('[MIGRATE receipts] 실패:', err.message);
+  }
+}
+
+// 기존 app_kv(app_data) 블롭에 남아 있던 자재 데이터를 테이블로 한 번만 이관
+export async function migrateMaterialsFromStore() {
+  const db = initDb();
+  if (!db) return;
+  try {
+    const count = await db.query('SELECT COUNT(*)::int AS cnt FROM materials');
+    if (count.rows[0].cnt > 0) return;
+    const store = await kvGet('app_data');
+    // 스토어 형식은 { materials: { value: [...], savedAt } } 또는 { materials: [...] }
+    let materials = store && store.materials;
+    if (materials && !Array.isArray(materials) && Array.isArray(materials.value)) {
+      materials = materials.value;
+    }
+    if (!Array.isArray(materials)) materials = [];
+    for (const m of materials) {
+      if (m && m.id) await insertMaterial(m);
+    }
+    if (materials.length > 0) {
+      console.log(`[MIGRATE materials] ${materials.length}건 이관 완료`);
+    }
+  } catch (err) {
+    console.error('[MIGRATE materials] 실패:', err.message);
   }
 }

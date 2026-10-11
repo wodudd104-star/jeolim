@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import * as XLSX from 'xlsx';
 import { Customer, Order } from '../types';
 import { load, save } from '../lib/storage';
 import { isAdmin } from './Login';
@@ -289,7 +288,9 @@ export default function Customers({ orders, refreshSignal, onOpenSms }: { orders
     }
   }
 
-  function exportCustomers() {
+  async function exportCustomers() {
+    // xlsx 라이브러리는 번들에서 분리해 엑셀 기능 사용 시에만 로드 (초기 로딩 속도 개선)
+    const XLSX = await import('xlsx');
     const rows = customers.map((c) => ({
       이름: c.name,
       연락처: c.phone,
@@ -311,6 +312,7 @@ export default function Customers({ orders, refreshSignal, onOpenSms }: { orders
     const reader = new FileReader();
     reader.onload = async (event) => {
       try {
+        const XLSX = await import('xlsx');
         const data = new Uint8Array(event.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array' });
         const sheetName = workbook.SheetNames[0];

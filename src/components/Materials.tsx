@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Material, Order } from '../types';
 import { load, save } from '../lib/storage';
 import { compressImage, saveSafely } from '../lib/images';
+import { deleteMaterialApi, fetchReceipt, syncAppData, uploadReceipt } from '../lib/api';
 
 const MATERIALS_KEY = 'jc-materials';
 
@@ -37,10 +38,20 @@ export function Materials({ orders }: { orders: Order[] }) {
   const [viewReceipt, setViewReceipt] = useState<string | null>(null);
   const [filterMonth, setFilterMonth] = useState('');
   const [saving, setSaving] = useState(false);
+  // 영수증 사진은 서버에 저장(receipts 테이블), 자재에는 참조 ID만 보관
+  const [receiptId, setReceiptId] = useState<string | null>(null);
 
   // 다른 기기에서 자재 데이터가 바뀌면 목록 갱신
   useEffect(() => {
-    const reload = () => setMaterials(loadMaterials());
+    const reload = (e?: Event) => {
+      // 이벤트에 서버 값 payload가 있으면 그대로 반영 (localStorage 용량 초과 시에도 최신 유지)
+      const detail = (e as CustomEvent).detail;
+      if (Array.isArray(detail)) {
+        setMaterials(detail as Material[]);
+        return;
+      }
+      setMaterials(loadMaterials());
+    };
     const onStorage = (e: StorageEvent) => {
       if (e.key === MATERIALS_KEY) reload();
     };
@@ -53,8 +64,12 @@ export function Materials({ orders }: { orders: Order[] }) {
   }, []);
 
   function persist(next: Material[]): boolean {
+    // 화면 상태를 먼저 반영한다. localStorage 용량 초과로 저장에 실패해도
+    // 서버 DB에 저장되므로 목록이 사라지지 않는다.
     const ok = saveSafely((v) => saveMaterials(v as Material[]), next);
-    if (ok) setMaterials(next);
+    setMaterials(next);
+    // 로컬 저장 여부와 관계없이 서버 DB에 즉시 저장 (실시간)
+    void syncAppData('materials', next).catch(() => {});
     return ok;
   }
 
@@ -62,8 +77,16 @@ export function Materials({ orders }: { orders: Order[] }) {
     const file = e.target.files?.[0];
     if (!file) return;
     const compressed = await compressImage(file);
+    // 영수증은 즉시 서버에 저장하고 자재 항목에는 ID만 연결한다
+    const id = editingId || crypto.randomUUID();
+    setReceiptId(id);
     setReceipt(compressed);
     e.target.value = '';
+    try {
+      await uploadReceipt(id, compressed);
+    } catch (err: any) {
+      alert(err.message || '영수증 저장에 실패했습니다.');
+    }
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -73,15 +96,27 @@ export function Materials({ orders }: { orders: Order[] }) {
       return;
     }
     const quantity = Math.max(1, Number(form.quantity) || 1);
-    const unitPrice = Math.max(0, Number(form.unitPrice) || 0);
+    // 음수 단가 허용 (할인/환불 등 차감 항목 입력 가능)
+    const unitPrice = Number(form.unitPrice) || 0;
     const totalPrice = quantity * unitPrice;
     setSaving(true);
     try {
       let next: Material[];
+      // 사진은 receipts 테이블(서버)에 저장되고 자재에는 receiptId만 남는다.
+      // 구버전 인라인 receipt 필드는 더 이상 저장하지 않는다.
       if (editingId) {
         next = materials.map((m) =>
           m.id === editingId
-            ? { ...m, ...form, name: form.name.trim(), quantity, unitPrice, totalPrice, receipt }
+            ? {
+                ...m,
+                ...form,
+                name: form.name.trim(),
+                quantity,
+                unitPrice,
+                totalPrice,
+                ...(receipt && receiptId ? { receiptId } : {}),
+                receipt: undefined,
+              }
             : m
         );
       } else {
@@ -94,17 +129,19 @@ export function Materials({ orders }: { orders: Order[] }) {
             quantity,
             unitPrice,
             totalPrice,
-            receipt,
+            ...(receipt && receiptId ? { receiptId } : {}),
+            receipt: undefined,
           },
           ...materials,
         ];
       }
       if (!persist(next)) {
-        alert('저장 공간이 부족합니다. 영수증 사진 용량을 줄여주세요.');
+        alert('기기 저장 공간이 부족합니다. 내역은 서버에 저장되었으니 다른 기기에서 확인해주세요.');
         return;
       }
       setForm({ ...emptyMaterial });
       setReceipt('');
+      setReceiptId(null);
       setEditingId(null);
     } finally {
       setSaving(false);
@@ -122,14 +159,27 @@ export function Materials({ orders }: { orders: Order[] }) {
       vendor: m.vendor || '',
       memo: m.memo || '',
     });
-    setReceipt(m.receipt || '');
     setEditingId(m.id);
+    setReceiptId(m.receiptId || m.id);
+    // 영수증 미리보기: 서버에서 조회 (구버전 인라인 receipt는 그대로 사용)
+    if (m.receipt) {
+      setReceipt(m.receipt);
+    } else if (m.receiptId) {
+      setReceipt('');
+      void fetchReceipt(m.receiptId).then((data) => {
+        if (data) setReceipt(data);
+      });
+    } else {
+      setReceipt('');
+    }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   function removeMaterial(id: string) {
     if (!confirm('이 자재 내역을 삭제하시겠습니까?')) return;
     persist(materials.filter((m) => m.id !== id));
+    // 서버 DB에서도 실제로 삭제 (삭제 기록이 남아 오래된 기기가 되살리지 못함)
+    void deleteMaterialApi(id).catch(() => {});
   }
 
   const months = useMemo(() => {
@@ -254,7 +304,6 @@ export function Materials({ orders }: { orders: Order[] }) {
                   <input
                     className='input'
                     type='number'
-                    min='0'
                     value={form.unitPrice}
                     onChange={(e) => setForm({ ...form, unitPrice: Number(e.target.value) })}
                   />
@@ -309,6 +358,7 @@ export function Materials({ orders }: { orders: Order[] }) {
                   onClick={() => {
                     setForm({ ...emptyMaterial });
                     setReceipt('');
+                    setReceiptId(null);
                     setEditingId(null);
                   }}
                 >
@@ -347,8 +397,22 @@ export function Materials({ orders }: { orders: Order[] }) {
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                     <span style={valueStyle}>{formatCurrency(m.totalPrice)}</span>
-                    {m.receipt && (
-                      <button className='btn' onClick={() => setViewReceipt(m.receipt || null)} title='영수증 보기'>
+                    {(m.receipt || m.receiptId) && (
+                      <button
+                        className='btn'
+                        onClick={() => {
+                          // 구버전 인라인 사진이 있으면 바로 표시, 없으면 서버에서 조회
+                          if (m.receipt) {
+                            setViewReceipt(m.receipt);
+                            return;
+                          }
+                          void fetchReceipt(m.receiptId || m.id).then((data) => {
+                            if (data) setViewReceipt(data);
+                            else alert('영수증 사진을 찾을 수 없습니다.');
+                          });
+                        }}
+                        title='영수증 보기'
+                      >
                         🧾
                       </button>
                     )}

@@ -47,6 +47,42 @@ export async function deleteOrderApi(id: string) {
   }
 }
 
+export async function deleteMaterialApi(id: string) {
+  const res = await fetch(getUrl(`/api/materials/${encodeURIComponent(id)}`), {
+    method: 'DELETE',
+    headers: getHeaders(),
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || '자재 삭제에 실패했습니다.');
+  }
+}
+
+// 영수증 사진은 서버 receipts 테이블에 별도 저장 (자재 데이터에는 참조 ID만)
+export async function uploadReceipt(id: string, data: string) {
+  const res = await fetch(getUrl('/api/receipts'), {
+    method: 'POST',
+    headers: getHeaders(),
+    credentials: 'include',
+    body: JSON.stringify({ id, data }),
+  });
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.error || '영수증 저장에 실패했습니다.');
+  }
+}
+
+export async function fetchReceipt(id: string): Promise<string | null> {
+  const res = await fetch(getUrl(`/api/receipts/${encodeURIComponent(id)}`), {
+    headers: getHeaders(),
+    credentials: 'include',
+  });
+  if (!res.ok) return null;
+  const json = await res.json().catch(() => ({}));
+  return typeof json.data === 'string' ? json.data : null;
+}
+
 export async function fetchAllAppData(): Promise<Record<string, unknown> | null> {
   const res = await fetch(getUrl('/api/data/all'), {
     credentials: 'include',

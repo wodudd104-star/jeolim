@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import * as XLSX from 'xlsx';
 import 'pretendard/dist/web/static/pretendard-dynamic-subset.css';
 import './style.css';
 import { sendSms, syncPublicOrder, fetchPublicOrder, cancelPublicOrder, fetchAllAppData, syncAppData, me, submitPublicCustomer, fetchCustomerIntake, ackCustomerIntake, confirmPublicPayment, fetchPublicPayments, subscribeEvents, updateServerAuth, fetchCustomers, createCustomer, updateCustomerApi, deleteOrderApi } from './lib/api';
@@ -96,9 +95,16 @@ function loadOrders(): Order[] {
   return normalizeOrders(load<StoredOrder[]>(ORDERS_KEY, []));
 }
 
+// 품목 미설정 시 사용하는 안전한 폴백 (기본 메뉴 하드코딩 제거)
+const fallbackProduct: Product = { id: '', name: '절임배추', unit: '박스', price: 0 };
+
+function resolveProduct(products: Product[]): Product {
+  return products[0] || fallbackProduct;
+}
+
 // URL 접수 고객 데이터로 주문 자동 생성 (첫 품목 기준, 이후 수정 가능)
 function buildOrderFromIntake(entry: Customer, products: Product[]): Order {
-  const product = products[0] || defaultProducts[0];
+  const product = resolveProduct(products);
   const quantity = Number(entry.quantity) > 0 ? Number(entry.quantity) : 1;
   const pickup: PickupType =
     entry.receiveMethod === '배송' || entry.receiveMethod === '택배' ? '배송' : '매장방문';
@@ -329,12 +335,6 @@ declare global {
   }
 }
 
-const defaultProducts: Product[] = [
-  { id: 'p1', name: '포기김치용', unit: '포기', price: 12000 },
-  { id: 'p2', name: '겉절이용', unit: '포기', price: 9000 },
-  { id: 'p3', name: '소금 절임배추', unit: 'kg', price: 8000 },
-];
-
 function normalizeProducts(value: unknown): Product[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -474,7 +474,7 @@ export default function App() {
   const [loggedIn, setLoggedIn] = useState(() => isLoggedIn());
   const [page, setPage] = useState<Page>('dashboard');
   const [orders, setOrders] = useState<Order[]>([]);
-  const [products, setProducts] = useState<Product[]>(defaultProducts);
+  const [products, setProducts] = useState<Product[]>([]);
   const [preparationDays, setPreparationDays] = useState(() => load('jc_preparation_days', 4));
   const [filter, setFilter] = useState<OrderStatus | '미납' | '부분납' | '완납' | '전체'>('전체');
   const [search, setSearch] = useState('');
@@ -517,7 +517,7 @@ export default function App() {
     setOrders(loadOrders());
     // 로그인 상태에서는 서버 싱크가 최신 품목/단가를 가져오므로 localStorage를 덮어쓰지 않는다.
     if (!isLoggedIn()) {
-      setProducts(load(PRODUCTS_KEY, defaultProducts));
+      setProducts(load(PRODUCTS_KEY, []));
     }
   }, []);
 
@@ -673,8 +673,15 @@ export default function App() {
     }
     const lsKey = SYNC_KEYS[key];
     if (!lsKey) return value;
+    // 영수증 사진이 포함된 자재 데이터 등은 localStorage 용량 한도를 초과할 수 있다.
+    // 저장 실패가 전체 동기화/적용을 중단시키지 않도록 예외를 흡수하고
+    // 화면 상태는 서버 값을 기준으로 유지한다.
     lastSyncedRef.current[key] = JSON.stringify(value);
-    save(lsKey, value);
+    try {
+      save(lsKey, value);
+    } catch {
+      // 용량 초과 시에도 서버 값은 화면에 반영된다 (서버 DB가 원본)
+    }
     if (key === 'accounts') {
       // 계좌번호는 로컬 저장소에 남기지 않고 화면 상태에만 반영한다
       localStorage.removeItem('jc_accounts');
@@ -690,7 +697,9 @@ export default function App() {
       window.dispatchEvent(new Event('jc-customers-updated'));
     }
     if (key === 'materials') {
-      window.dispatchEvent(new Event('jc-materials-updated'));
+      // localStorage 저장이 실패해도 화면이 최신 자재 목록을 유지하도록
+      // 서버 값을 이벤트 payload로 직접 전달한다.
+      window.dispatchEvent(new CustomEvent('jc-materials-updated', { detail: value }));
     }
     return value;
   }, []);
@@ -1417,7 +1426,9 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [printOrder]);
 
-  function exportExcel() {
+  async function exportExcel() {
+    // xlsx 라이브러리는 번들에서 분리해 엑셀 기능 사용 시에만 로드 (초기 로딩 속도 개선)
+    const XLSX = await import('xlsx');
     const rows = filtered.map((o) => ({
       접수일: formatDate(o.createdAt),
       고객명: o.name,
@@ -1479,7 +1490,7 @@ export default function App() {
       const pickupDate = parseKoreanDate(dateText);
       const deposit = isDoneStatus(doneText);
 
-      const product = products[0] || defaultProducts[0];
+      const product = resolveProduct(products);
       const pricePerUnit = product.price;
       const totalPrice = calcTotal(quantity, pricePerUnit);
 
@@ -1517,8 +1528,9 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
+        const XLSX = await import('xlsx');
         const data = new Uint8Array(event.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array' });
         const sheetName = workbook.SheetNames[0];
@@ -3762,7 +3774,20 @@ function ProductSettingsModal({
   );
 }
 
-function SmsModal({ orders, customers, onClose }: { orders?: Order[]; customers?: Customer[] | null; onClose: () => void }) {
+function SmsModal({ orders, customers: initialCustomers, onClose }: { orders?: Order[]; customers?: Customer[] | null; onClose: () => void }) {
+  // 선택된 고객이 전달되면 그 목록을, 없으면(관리자 메뉴에서 열 때)
+  // 서버에서 전체 고객을 불러와 수신자를 선택할 수 있게 한다.
+  const [customers, setCustomers] = useState<Customer[] | null>(
+    initialCustomers && initialCustomers.length ? initialCustomers : null
+  );
+  useEffect(() => {
+    if (customers) return;
+    if (!isAdmin()) return;
+    fetchCustomers()
+      .then((list) => setCustomers(list))
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const recipients = useMemo(() => {
     const seen = new Set<string>();
     const source = customers?.length ? customers : (orders || []);
@@ -3783,12 +3808,25 @@ function SmsModal({ orders, customers, onClose }: { orders?: Order[]; customers?
   const [selectedIds, setSelectedIds] = useState<Set<string>>(
     () => new Set(recipients.map((r) => r.id))
   );
+  // 고객 목록이 서버에서 로드되면 기본 전체 선택
+  useEffect(() => {
+    setSelectedIds(new Set(recipients.map((r) => r.id)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recipients]);
   const [message, setMessage] = useState('');
+  const [recipientSearch, setRecipientSearch] = useState('');
   const [copied, setCopied] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState<string | null>(null);
 
   const selectedRecipients = recipients.filter((r) => selectedIds.has(r.id));
+  const filteredRecipients = recipientSearch.trim()
+    ? recipients.filter(
+        (r) =>
+          r.name.includes(recipientSearch.trim()) ||
+          r.phone.includes(recipientSearch.trim().replace(/\D/g, ''))
+      )
+    : recipients;
   const previewRecipient = selectedRecipients[0] || recipients[0];
   const preview = previewRecipient ? personalizeMessage(message || '(메시지를 입력하세요)', previewRecipient) : '';
 
@@ -3882,18 +3920,31 @@ function SmsModal({ orders, customers, onClose }: { orders?: Order[]; customers?
             {recipients.length === 0 ? (
               <p className='empty-mini'>보낼 수 있는 고객이 없습니다.</p>
             ) : (
-              recipients.map((r) => (
-                <label key={r.id} className='recipient-row'>
-                  <input
-                    type='checkbox'
-                    checked={selectedIds.has(r.id)}
-                    onChange={() => toggleOne(r.id)}
-                  />
-                  <span className='recipient-name'>{r.name}</span>
-                  <span className='recipient-phone'>{formatPhone(r.phone)}</span>
-                  <span className='recipient-status'>{(r as any).status || ''}</span>
-                </label>
-              ))
+              <>
+              <input
+                type='text'
+                className='input recipient-search'
+                placeholder='이름 또는 연락처로 검색'
+                value={recipientSearch}
+                onChange={(e) => setRecipientSearch(e.target.value)}
+              />
+              {filteredRecipients.length === 0 ? (
+                <p className='empty-mini'>검색 결과가 없습니다.</p>
+              ) : (
+                filteredRecipients.map((r) => (
+                  <label key={r.id} className='recipient-row'>
+                    <input
+                      type='checkbox'
+                      checked={selectedIds.has(r.id)}
+                      onChange={() => toggleOne(r.id)}
+                    />
+                    <span className='recipient-name'>{r.name}</span>
+                    <span className='recipient-phone'>{formatPhone(r.phone)}</span>
+                    <span className='recipient-status'>{(r as any).status || ''}</span>
+                  </label>
+                ))
+              )}
+              </>
             )}
           </div>
         </div>

@@ -79,6 +79,9 @@ export type Material = {
   unitPrice: number;
   totalPrice: number;
   vendor?: string;
+  // 영수증 사진은 서버 receipts 테이블에 별도 저장, 자재에는 참조 ID만 보관
+  // (구버전 호환용 receipt 인라인 필드는 마이그레이션 후 제거됨)
+  receiptId?: string;
   receipt?: string;
   memo?: string;
 };
